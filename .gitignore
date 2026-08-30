@@ -1,0 +1,43 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# === PyInstaller build outputs ===
+# 注意：build/build_exe.py 和 build/merge_fonts.spec 是源码，需要提交；
+# 这里只忽略 PyInstaller 生成的输出子目录（如 build/merge_fonts/）
+build/*/
+*.manifest
+*.toc
+
+# === 授权测试字体与生成样品：绝不提交 ===
+# 以下目录用于存放本地测试字体（含 HelveticaNowVar/FZ/汉仪 等商业授权字体）
+test/fonts/
+test/samples/
+samples/
+render_out/
+matrix_out/
+
+# === 编辑器 / 操作系统 ===
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# === 打包产物 ===
+*.zip
+*.7z
