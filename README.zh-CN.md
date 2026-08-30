@@ -97,7 +97,7 @@ CLI 为交互式：依次输入主字体（缩放% + 基线偏移）、任意级
 ========================================================
 
 请输入主字体（拖入文件或输入路径）:
-  主字体路径:  test/OpenType/ClassicoURW-Reg.otf
+  主字体路径:  test/OpenType/LibreCaslonText-Regular.otf
   缩放倍率(%) [100]: 100
   基线偏移 [0]: 0
 第 1 级打底字体（Y 结束）:
@@ -105,25 +105,24 @@ CLI 为交互式：依次输入主字体（缩放% + 基线偏移）、任意级
   缩放倍率(%) [100]: 100
   基线偏移 [0]: 0
 第 2 级打底字体（Y 结束）:
-  路径:  test/TrueType/tt0015m_.ttf
+  路径:  test/TrueType/LXGWWenKaiTC-Regular.ttf
   缩放倍率(%) [100]: 100
   基线偏移 [0]: 0
 第 3 级打底字体（Y 结束）:
   路径:  Y
 
 加载字体...
-  test/OpenType/ClassicoURW-Reg.otf
-    静态OTF, 657 字形
+  test/OpenType/LibreCaslonText-Regular.otf
+    静态OTF, 537 字形
   test/otf_variable_fonts/SourceSerif4Variable-Roman.otf
     可变OTF, 1464 字形
-  test/TrueType/tt0015m_.ttf
-    静态TTF, 261 字形
+  test/TrueType/LXGWWenKaiTC-Regular.ttf
+    静态TTF, 25764 字形
 
 兼容性检查...
   [警告] 打底字体为可变字体, 将先实例化为静态再合并
   [警告] 混合轮廓格式: 主字体为CFF, 打底为glyf. 将自动转换打底字体
-  [警告] 打底字体为可变字体, 将先实例化为静态再合并
-  [警告] UPM不匹配: 主字体1000 vs 打底字体2048. 将自动缩放打底字体
+  [警告] 主字体为可变字体, 将先实例化为静态再合并
 
 开始合并...
 
@@ -132,12 +131,13 @@ CLI 为交互式：依次输入主字体（缩放% + 基线偏移）、任意级
   [CFF2→CFF] 转换完成 (1464 glyphs)
   [重叠合并] 完成 (1464 glyphs)
   [CID归一] 打底字体 CID→name (输出统一为 name-keyed)
-  [冲突] 608 个字形
-  [新增] 855 个字形
-  合并后字形: 1512
-  [OT合并] GDEF: 来自打底 (主无, 过滤后 147 个字类)
+  [CID→name] 转换完成 (1464 glyphs)
+  [冲突] 409 个字形
+  [新增] 1054 个字形
+  合并后字形: 1591
+  [OT合并] GDEF: 来自打底 (主无, 过滤后 200 个字类)
   [OT合并] GSUB: 追加 10 个打底 feature (主冲突跳过)
-  [OT合并] GPOS: 追加 1 个打底 feature (主冲突跳过)
+  [OT合并] GPOS: 追加 2 个打底 feature (主冲突跳过)
 
 --- 第 2 级 ---
   主: 静态OTF | 打底: 静态TTF
@@ -145,23 +145,23 @@ CLI 为交互式：依次输入主字体（缩放% + 基线偏移）、任意级
     1. OTF
     2. TTF
 > 1
-  [UPM] 缩放打底字体: 2048 → 1000
   [转换] 轮廓格式不同，自动转换打底字体...
-  [冲突] 259 个字形
-  [新增] 1 个字形
-  合并后字形: 1513
-  [OT合并] 打底无布局表, 跳过
+  [冲突] 915 个字形
+  [新增] 24848 个字形
+  [分块] 5 块, 每块 ≤5000 字形
+  [OT合并] GSUB: 追加 2 个打底 feature (主冲突跳过)
+  [OT合并] GPOS: 追加 3 个打底 feature (主冲突跳过)
 
 处理名称...
 
-输出路径 [test/OpenType/ClassicoURW-Reg_mod.otf]: 
-完成! test/OpenType/ClassicoURW-Reg_mod.otf
-  静态OTF, 1513 字形
+输出路径 [test/OpenType/LibreCaslonText-Regular_mod.otf]: 
+完成! test/OpenType/LibreCaslonText-Regular_mod.otf
+  静态OTF, 26439 字形
 ```
 
 要点：
 
-- 第 1 级询问的“导出格式”在第 2 级自动复用答案（记忆机制）
+- 导出格式类询问只问一次，后续级自动复用答案（记忆机制）
 - 每级打底可独立指定缩放倍率与基线偏移
 - 兼容性警告仅提示，`y` 可确认继续
 
@@ -188,7 +188,7 @@ result = merge_fonts("main.otf", ["base1.otf", "base2.ttf"])
 
 ### 测试
 
-`tests/generate_matrix.py` 生成 16 组合完整矩阵；`tests/test_merger.py` 为单元测试。测试需要本地字体集（路径解析于 `tests/../test/`）——**字体本身不随仓库分发**。
+`tests/generate_matrix.py` 生成 16 组合完整矩阵；`tests/test_merger.py` 为单元测试。测试需要本地字体集（路径解析于 `tests/../test/`）——**字体本身不随仓库分发**。样例所用的 [Google Fonts OFL 字体](https://fonts.google.com/)（Libre Caslon Text、LXGW WenKai TC、Source Serif/Source Han、Zed Text）可自由下载；**商业授权**测试字体通过本地不入库文件 `tests/local_fonts.py` 映射（模板：`tests/local_fonts.example.py`），任一字体缺失时对应用例自动跳过。
 
 ## 已知限制
 
@@ -198,7 +198,7 @@ result = merge_fonts("main.otf", ["base1.otf", "base2.ttf"])
 4. **VORG**：默认轴位置实例化时数值正确；非默认位置需额外重算
 5. **多级 OT 特性**：上级已并入的 feature 会在下级被重复检测（幂等，但 lookup 可能冗余）
 6. **打包**：仓库根目录即包本身，`pip install` 尚未接线——目前 clone 即用；PyPI 化目录结构在规划中
-7. **本地授权字体**（如 Helvetica Now Var、方正、汉仪字体）仅用于本地测试，刻意不包含在本仓库中
+7. **本地授权字体**仅用于本地测试，刻意不包含在本仓库中（真实路径见未入库的 `tests/local_fonts.py`）；文档样例中出现的字体均为 OFL 开源授权。
 
 ## 协议
 

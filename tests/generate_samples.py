@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""基于 test 文件夹中的字体生成合并样例"""
+"""基于 test 文件夹中的字体生成合并样例
+
+字体说明:
+- OFL 公开字体直接按文件名定位; 文件不存在时对应样例 SKIP。
+- 商业授权字体路径通过 tests/local_fonts.py 配置 (该文件不入库)。
+"""
 
 import os, sys, copy, time
 
@@ -18,6 +23,33 @@ from FontMerger import (FontMerger, type_label, get_copyrights,
 from fontTools.ttLib import TTFont
 
 
+def font(rel):
+    """公开字体路径; 不存在返回 None"""
+    p = os.path.join(_test_dir, rel)
+    return p if os.path.exists(p) else None
+
+
+def local(role):
+    """本地授权字体路径 (tests/local_fonts.py 配置); 未配置返回 None"""
+    try:
+        from tests.local_fonts import LOCAL_FONTS
+        rel = LOCAL_FONTS.get(role)
+    except ImportError:
+        rel = None
+    if not rel:
+        return None
+    p = os.path.join(_test_dir, rel)
+    return p if os.path.exists(p) else None
+
+
+def s(font_path, sample_name):
+    """打开字体; 缺失时打印 SKIP 并返回 None"""
+    if not font_path:
+        print(f"  SKIP: {sample_name} (字体未就位)")
+        return None
+    return TTFont(font_path)
+
+
 def ensure_output():
     os.makedirs(_output_dir, exist_ok=True)
 
@@ -25,8 +57,10 @@ def ensure_output():
 def sample1_otf_plus_otf():
     """样例1: 静态OTF(拉丁) + 静态OTF(中文) → 中拉丁混合字体"""
     print("Sample 1: 静态OTF + 静态OTF (拉丁+中文)")
-    main = TTFont(os.path.join(_test_dir, "OpenType", "ClassicoURW-Reg.otf"))
-    base = TTFont(os.path.join(_test_dir, "OpenType", "FZHengFSJF-R.OTF"))
+    main = s(font("OpenType/LibreCaslonText-Regular.otf"), "Sample1")
+    base = s(local("cjk_static_otf"), "Sample1")
+    if not main or not base:
+        return None
     print(f"  Main: {type_label(main)}, {len(main.getGlyphOrder())} glyphs")
     print(f"  Base: {type_label(base)}, {len(base.getGlyphOrder())} glyphs")
 
@@ -47,8 +81,10 @@ def sample1_otf_plus_otf():
 def sample2_ttf_plus_ttf():
     """样例2: 静态TTF + 静态TTF"""
     print("Sample 2: 静态TTF + 静态TTF")
-    main = TTFont(os.path.join(_test_dir, "TrueType", "tt0015m_.ttf"))
-    base = TTFont(os.path.join(_test_dir, "TrueType", "FZYASHJW.TTF"))
+    main = s(font("TrueType/LXGWWenKaiTC-Regular.ttf"), "Sample2")
+    base = s(local("cjk_static_ttf"), "Sample2")
+    if not main or not base:
+        return None
     print(f"  Main: {type_label(main)}, {len(main.getGlyphOrder())} glyphs")
     print(f"  Base: {type_label(base)}, {len(base.getGlyphOrder())} glyphs")
 
@@ -70,8 +106,10 @@ def sample2_ttf_plus_ttf():
 def sample3_otf_plus_ttf_conversion():
     """样例3: 静态OTF + 静态TTF (混合格式自动转换)"""
     print("Sample 3: 静态OTF + 静态TTF (格式转换)")
-    main = TTFont(os.path.join(_test_dir, "OpenType", "ClassicoURW-Reg.otf"))
-    base = TTFont(os.path.join(_test_dir, "TrueType", "HYWenHei-55S.ttf"))
+    main = s(font("OpenType/LibreCaslonText-Regular.otf"), "Sample3")
+    base = s(local("cjk_ttf_hanyi"), "Sample3")
+    if not main or not base:
+        return None
     print(f"  Main: {type_label(main)}, {len(main.getGlyphOrder())} glyphs")
     print(f"  Base: {type_label(base)}, {len(base.getGlyphOrder())} glyphs")
 
@@ -93,9 +131,9 @@ def sample3_otf_plus_ttf_conversion():
 def sample4_variable_instantiate_and_merge():
     """样例4: 可变OTF实例化 + 合并"""
     print("Sample 4: 可变OTF → 静态实例 + 合并")
-    vf_path = os.path.join(_test_dir, "otf_variable_fonts", "SourceHanSansCN-VF.otf")
-    if not os.path.exists(vf_path):
-        print("  SKIP: SourceHanSansCN-VF.otf not found")
+    vf_path = font("otf_variable_fonts/SourceHanSansCN-VF.otf")
+    if not vf_path:
+        print("  SKIP: Sample4 (SourceHanSansCN-VF.otf not found)")
         return None
 
     vf = TTFont(vf_path)
@@ -107,8 +145,8 @@ def sample4_variable_instantiate_and_merge():
           f"{len(static_inst.getGlyphOrder())} glyphs")
 
     # 与另一个字体合并
-    sym_path = os.path.join(_test_dir, "otf_variable_fonts", "SFSymbolsFallback.otf")
-    if os.path.exists(sym_path):
+    sym_path = local("symbols_otf")
+    if sym_path:
         sym = TTFont(sym_path)
         print(f"  Symbol font: {type_label(sym)}, {len(sym.getGlyphOrder())} glyphs")
 
@@ -124,15 +162,18 @@ def sample4_variable_instantiate_and_merge():
         result.save(out)
         print(f"  Saved: {out}")
         return result
+    print("  SKIP: Sample4 (symbols font 未配置)")
     return static_inst
 
 
 def sample5_multilevel_merge():
     """样例5: 三级合并 (主 + 打底1 + 打底2)"""
     print("Sample 5: 多级合并")
-    main = TTFont(os.path.join(_test_dir, "OpenType", "ClassicoURW-Reg.otf"))
-    base1 = TTFont(os.path.join(_test_dir, "OpenType", "FZHengFSJF-R.OTF"))
-    base2 = TTFont(os.path.join(_test_dir, "OpenType", "SourceHanSansSC-Regular.otf"))
+    main = s(font("OpenType/LibreCaslonText-Regular.otf"), "Sample5")
+    base1 = s(local("cjk_static_otf"), "Sample5")
+    base2 = s(font("OpenType/SourceHanSansSC-Regular.otf"), "Sample5")
+    if not main or not base1 or not base2:
+        return None
     print(f"  Main: {type_label(main)}, {len(main.getGlyphOrder())} glyphs")
     print(f"  Base1: {type_label(base1)}, {len(base1.getGlyphOrder())} glyphs")
     print(f"  Base2: {type_label(base2)}, {len(base2.getGlyphOrder())} glyphs")
@@ -156,8 +197,11 @@ def sample5_multilevel_merge():
 def sample6_high_level_api():
     """样例6: 便捷 API (merge_fonts 一行调用)"""
     print("Sample 6: merge_fonts 便捷 API")
-    main_path = os.path.join(_test_dir, "OpenType", "ClassicoURW-Reg.otf")
-    base1_path = os.path.join(_test_dir, "OpenType", "FZHengFSJF-R.OTF")
+    main_path = font("OpenType/LibreCaslonText-Regular.otf")
+    base1_path = local("cjk_static_otf")
+    if not main_path or not base1_path:
+        print("  SKIP: Sample6 (字体未就位)")
+        return None
 
     result = merge_fonts(main_path, [base1_path], interactive=False)
     print(f"  Result: {type_label(result)}, {len(result.getGlyphOrder())} glyphs")

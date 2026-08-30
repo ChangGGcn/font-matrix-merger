@@ -2,6 +2,12 @@
 """生成 16 种类型矩阵 + 复杂混合字体
 
 v2 (真路径版): C/D 组直接传原始 VF, 保留可变性输出 + Axis 并集。
+
+字体说明:
+- OFL 公开字体 (LibreCaslonText / LXGW WenKai TC / Source Serif / Source Han / Zed Text)
+  直接按文件名定位 (目录位于仓库外, 本地需自备)。
+- 商业授权字体 (CJK 静态/可变等) 路径通过 tests/local_fonts.py 配置 (该文件不入库);
+  任一字体缺失时本脚本整体跳过并打印缺失项。
 """
 import os, sys, copy, time
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -13,18 +19,55 @@ sys.path.insert(0, _project_dir)
 from FontMerger import *
 from fontTools.ttLib import TTFont
 
-def L(p): return TTFont(os.path.join(_test_dir, p))
-
-P = {
-    "sOTF_latin":  L("OpenType/ClassicoURW-Reg.otf"),
-    "sOTF_cjk":    L("OpenType/FZHengFSJF-R.OTF"),
-    "sTTF_latin":  L("TrueType/tt0015m_.ttf"),
-    "sTTF_cjk":    L("TrueType/FZYASHJW.TTF"),
-    "vOTF_serif":  L("otf_variable_fonts/SourceSerif4Variable-Roman.otf"),
-    "vOTF_cjk_jp": L("otf_variable_fonts/SourceHanSansJP-VF.otf"),
-    "vTTF_helv":   L("ttf_variable_fonts/HelveticaNowVar.ttf"),
-    "vTTF_cjk":    L("ttf_variable_fonts/ZedTextSCVF.ttf"),
+#: 公开 OFL 字体: 角色 -> 相对 _test_dir 的路径
+OPEN_FONTS = {
+    "sOTF_latin":  "OpenType/LibreCaslonText-Regular.otf",
+    "sTTF_latin":  "TrueType/LXGWWenKaiTC-Regular.ttf",
+    "vOTF_serif":  "otf_variable_fonts/SourceSerif4Variable-Roman.otf",
+    "vOTF_cjk_jp": "otf_variable_fonts/SourceHanSansJP-VF.otf",
+    "vTTF_cjk":    "ttf_variable_fonts/ZedTextSCVF.ttf",
 }
+
+#: 本地授权字体角色 (真实路径见 tests/local_fonts.py, 未配置时 None)
+LOCAL_ROLES = {
+    "sOTF_cjk": "cjk_static_otf",
+    "sTTF_cjk": "cjk_static_ttf",
+    "vTTF_helv": "vf_ttf_helvetica",
+}
+
+
+def L(rel):
+    """打开相对 _test_dir 的字体；不存在返回 None"""
+    p = os.path.join(_test_dir, rel)
+    if not os.path.exists(p):
+        return None
+    return TTFont(p)
+
+
+def LC(role):
+    """本地授权字体（tests/local_fonts.py 配置）；未配置/不存在返回 None"""
+    try:
+        from tests.local_fonts import LOCAL_FONTS
+        rel = LOCAL_FONTS.get(role)
+    except ImportError:
+        rel = None
+    if not rel:
+        return None
+    return L(rel)
+
+
+P = {}
+for _role, _rel in OPEN_FONTS.items():
+    P[_role] = L(_rel)
+for _role, _lrole in LOCAL_ROLES.items():
+    P[_role] = LC(_lrole)
+
+_missing = [k for k, v in P.items() if v is None]
+if _missing:
+    print("缺少测试字体, 跳过矩阵生成:", ", ".join(_missing))
+    print("  - OFL 字体请放入 test/ 对应目录 (见 README 'Tests')")
+    print("  - 商业授权字体请配置 tests/local_fonts.py (见 local_fonts.example.py)")
+    sys.exit(0)
 
 ots = []
 def mg(label, m, b, extra="", mem=None):

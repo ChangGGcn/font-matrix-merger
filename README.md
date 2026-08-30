@@ -97,7 +97,7 @@ The CLI is interactive: enter the main font path (plus scale % and baseline offs
 ========================================================
 
 请输入主字体（拖入文件或输入路径）:
-  主字体路径:  test/OpenType/ClassicoURW-Reg.otf
+  主字体路径:  test/OpenType/LibreCaslonText-Regular.otf
   缩放倍率(%) [100]: 100
   基线偏移 [0]: 0
 第 1 级打底字体（Y 结束）:
@@ -105,25 +105,24 @@ The CLI is interactive: enter the main font path (plus scale % and baseline offs
   缩放倍率(%) [100]: 100
   基线偏移 [0]: 0
 第 2 级打底字体（Y 结束）:
-  路径:  test/TrueType/tt0015m_.ttf
+  路径:  test/TrueType/LXGWWenKaiTC-Regular.ttf
   缩放倍率(%) [100]: 100
   基线偏移 [0]: 0
 第 3 级打底字体（Y 结束）:
   路径:  Y
 
 加载字体...
-  test/OpenType/ClassicoURW-Reg.otf
-    静态OTF, 657 字形
+  test/OpenType/LibreCaslonText-Regular.otf
+    静态OTF, 537 字形
   test/otf_variable_fonts/SourceSerif4Variable-Roman.otf
     可变OTF, 1464 字形
-  test/TrueType/tt0015m_.ttf
-    静态TTF, 261 字形
+  test/TrueType/LXGWWenKaiTC-Regular.ttf
+    静态TTF, 25764 字形
 
 兼容性检查...
   [警告] 打底字体为可变字体, 将先实例化为静态再合并
   [警告] 混合轮廓格式: 主字体为CFF, 打底为glyf. 将自动转换打底字体
-  [警告] 打底字体为可变字体, 将先实例化为静态再合并
-  [警告] UPM不匹配: 主字体1000 vs 打底字体2048. 将自动缩放打底字体
+  [警告] 主字体为可变字体, 将先实例化为静态再合并
 
 开始合并...
 
@@ -132,12 +131,13 @@ The CLI is interactive: enter the main font path (plus scale % and baseline offs
   [CFF2→CFF] 转换完成 (1464 glyphs)
   [重叠合并] 完成 (1464 glyphs)
   [CID归一] 打底字体 CID→name (输出统一为 name-keyed)
-  [冲突] 608 个字形
-  [新增] 855 个字形
-  合并后字形: 1512
-  [OT合并] GDEF: 来自打底 (主无, 过滤后 147 个字类)
+  [CID→name] 转换完成 (1464 glyphs)
+  [冲突] 409 个字形
+  [新增] 1054 个字形
+  合并后字形: 1591
+  [OT合并] GDEF: 来自打底 (主无, 过滤后 200 个字类)
   [OT合并] GSUB: 追加 10 个打底 feature (主冲突跳过)
-  [OT合并] GPOS: 追加 1 个打底 feature (主冲突跳过)
+  [OT合并] GPOS: 追加 2 个打底 feature (主冲突跳过)
 
 --- 第 2 级 ---
   主: 静态OTF | 打底: 静态TTF
@@ -145,23 +145,23 @@ The CLI is interactive: enter the main font path (plus scale % and baseline offs
     1. OTF
     2. TTF
 > 1
-  [UPM] 缩放打底字体: 2048 → 1000
   [转换] 轮廓格式不同，自动转换打底字体...
-  [冲突] 259 个字形
-  [新增] 1 个字形
-  合并后字形: 1513
-  [OT合并] 打底无布局表, 跳过
+  [冲突] 915 个字形
+  [新增] 24848 个字形
+  [分块] 5 块, 每块 ≤5000 字形
+  [OT合并] GSUB: 追加 2 个打底 feature (主冲突跳过)
+  [OT合并] GPOS: 追加 3 个打底 feature (主冲突跳过)
 
 处理名称...
 
-输出路径 [test/OpenType/ClassicoURW-Reg_mod.otf]: 
-完成! test/OpenType/ClassicoURW-Reg_mod.otf
-  静态OTF, 1513 字形
+输出路径 [test/OpenType/LibreCaslonText-Regular_mod.otf]: 
+完成! test/OpenType/LibreCaslonText-Regular_mod.otf
+  静态OTF, 26439 字形
 ```
 
 Notes:
 
-- The export-format question asked at level 1 is **auto-answered** at level 2 (memorization).
+- Export-format / output questions are asked only **once**; later levels reuse the memorized answer.
 - Each base level can have its own scale % and baseline offset.
 - Compatibility warnings are informational; confirm with `y` to continue.
 
@@ -188,7 +188,7 @@ result = merge_fonts("main.otf", ["base1.otf", "base2.ttf"])
 
 ### Tests
 
-`tests/generate_matrix.py` generates the full 16-combination matrix; `tests/test_merger.py` contains the unit tests. The test suite needs a local font collection (paths are resolved under `tests/../test/`) — the fonts themselves are **not redistributed** with the repository.
+`tests/generate_matrix.py` generates the full 16-combination matrix; `tests/test_merger.py` contains the unit tests. The test suite needs a local font collection (paths are resolved under `tests/../test/`) — the fonts themselves are **not redistributed** with the repository. [OFL Google Fonts](https://fonts.google.com/) typefaces used in the samples (Libre Caslon Text, LXGW WenKai TC, Source Serif/Source Han, Zed Text) can be downloaded freely; *commercially licensed* test fonts are mapped in the local, non-committed file `tests/local_fonts.py` (template: `tests/local_fonts.example.py`) and any missing font simply skips the corresponding case.
 
 ## Known Limitations
 
@@ -198,7 +198,7 @@ result = merge_fonts("main.otf", ["base1.otf", "base2.ttf"])
 4. **VORG**: values are correct when instancing at the default axis position; non-default positions need recomputation.
 5. **Multi-level OT features**: a feature already merged at an earlier level is re-detected at later levels (idempotent, but lookups may become redundant).
 6. **Packaging**: the repository root is the package itself, so `pip install` from a clone is not wired up yet — clone-and-run for now; a PyPI-ready layout is planned.
-7. **Locally licensed fonts** (e.g. Helvetica Now Var, Founder and Hanyi typefaces) are used only for local testing and are intentionally excluded from this repository.
+7. **Locally licensed fonts** are used only for local testing and are intentionally excluded from this repository (paths live in the non-committed `tests/local_fonts.py`); all fonts named in the documentation samples are OFL-licensed.
 
 ## License
 
