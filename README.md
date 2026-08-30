@@ -1,42 +1,94 @@
-# FontMerger 字体合并工具
+# font-matrix-merger
 
-> **版本:** 0.1.0-alpha1
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)]()
+[![FontTools](https://img.shields.io/badge/fontTools-%E2%89%A54.49-important.svg)]()
+[![Version](https://img.shields.io/badge/version-0.1.0--alpha1-orange.svg)]()
 
-基于 **fontTools + afdko** 的 Python 字体合并工具包：支持 **静态/可变 × OTF/TTF** 任意组合的多级字体合并，含格式转换、CID 处理、OpenType 特性修剪、Axis 并集、缩放/基线偏移等能力。
+**English** | [简体中文](README.zh-CN.md)
 
----
+**font-matrix-merger** is a powerful Python library for merging multiple fonts into one, covering every combination of **static / variable × OTF / TTF** for both the main font and the base fonts — with format conversion, CID-keyed CFF handling, OpenType feature merging, variable-font axis unions, scaling and baseline offsets, and multi-level (n-step) chained merges.
 
-## 功能总览
+## About
 
-| 能力 | 说明 |
-|------|------|
-| **16 类型合并矩阵** | 静态/可变 × OTF/TTF × 主/打底 的全部 16 种组合（`merge_two` 自动分派） |
-| **多级打底** | 主字体 + 1~n 级打底字体依次合并；复杂情况询问只问一次（记忆机制） |
-| **格式互转** | CFF↔glyf（三次曲线↔二次曲线），CFF2→CFF（官方 `_convertCFF2ToCFF`）、CFF→CFF2 |
-| **CID 合并** | 双 CID 字体 CID 偏移 + 直接 CharString 复制；CID↔name-keyed 转换 |
-| **可变字体** | 主 VF 保留可变性输出（CFF2/HVAR/STAT/fvar 完整保留+补全） |
-| **Axis 并集** | 主/打底轴空间取并集；varStore(含 GDEF/HVAR/MVAR) 区域恒定轴扩展 |
-| **OpenType 特性合并** | 打底 GSUB/GPOS/GDEF 按存活字形修剪（fontTools Subsetter 闭包）；冲突以主为准；字形名深度重映射 |
-| **缩放 + 基线偏移** | 关于 (0,0) 点缩放 + 基线偏移（Pen 管线重建轮廓，度量同步） |
-| **重叠合并** | 可变→静态实例化后 `removeOverlaps` 布尔合并 |
-| **WOFF/WOFF2 解包** | 支持 webfont 直接输入 |
-| **命名处理** | 输出家族名 `<主字体> mod`，版权信息合并 |
+The library is built on top of [**FontTools**](https://github.com/fonttools/fonttools) (MIT) — used for all glyph/table-level manipulation, CFF/CFF2 conversion, varLib instancing and subsetting — and follows the conventions of [**AFDKO**](https://github.com/adobe-type-tools/afdko) (Adobe Font Development Kit for OpenType, Apache-2.0), which is bundled in the project's PyInstaller build pipeline and referenced for its CID-keyed UFO / CIDMap remapping approach.
 
-## 快速开始
+Key highlights:
+
+- **16-way merge matrix**: `merge_two()` auto-dispatches to the right strategy for any main/base combination.
+- **Multi-level chaining**: a main font plus 1..n base fonts, merged level by level; format/export questions are asked only once (answer memorization).
+- **CID-aware**: dual-CID fonts are merged via CID offset + materialized CharString copy; CID↔name-keyed normalization is handled automatically.
+- **Variable fonts**: a variable main font stays variable in the output, with axis **union** across main and base fonts (fvar/avar/STAT synchronized, varStore regions extended).
+- **OpenType merging**: base GSUB/GPOS/GDEF tables are pruned with `fontTools.subset` closure to the surviving glyphs, then appended with lookup-index remapping and deep glyph-name remapping; conflicts resolve in favor of the main font.
+- **Pure FontTools pipeline**: glyph injection goes through the official TTX XML roundtrip (`saveXML` → inject → `ttx` compile) instead of `fontTools.merge`, which raises `NotImplementedError` on CID-keyed CFF.
+
+### Project layout
+
+```
+FontMerger/
+├── FontMerging.py           # Interactive CLI entry point
+├── __init__.py              # Public API exports
+├── core/                    # 16-way dispatch, TTX glyph injection, conflict & naming
+├── format/                  # static extraction, CFF↔glyf, CID, axis union, transform, subset, webfont
+├── tables/                  # per-table merge registry + GSUB/GPOS/GDEF merge
+├── tests/                   # 16-matrix generator + unit tests
+└── build/                   # PyInstaller packaging (bundles FontTools + AFDKO)
+```
+
+## Features
+
+| Capability | Description |
+|---|---|
+| **16-way merge matrix** | All `static/variable × OTF/TTF × main/base` combinations, auto-dispatched |
+| **Multi-level chaining** | Main + 1..n base fonts; each level can have its own scale & baseline offset |
+| **Format conversion** | CFF↔glyf (cubic↔quadratic), CFF2→CFF (`_convertCFF2ToCFF`), CFF→CFF2 |
+| **CID merging** | Dual-CID: CID offset + direct CharString copy; CID↔name-keyed conversion (incl. cmap format 14 UVS) |
+| **Variable fonts** | Main VF preserved in output (CFF2/HVAR/STAT/fvar kept & extended) |
+| **Axis union** | Union of main/base axis spaces; varStore (incl. GDEF/HVAR/MVAR) constant-axis region extension |
+| **OpenType feature merging** | Base GSUB/GPOS/GDEF pruned via Subsetter closure; per-tag conflict → main wins |
+| **Scale + baseline offset** | Pen-pipeline outline rebuild (T2CharStringPen/TTGlyphPen + TransformPen) with synced metrics |
+| **Overlap removal** | `removeOverlaps` boolean union after variable→static instancing |
+| **Subsetting** | `create_glyph_subset` — keep only glyphs for a given character set |
+| **WOFF/WOFF2 unwrap** | Web fonts accepted as input directly |
+| **Naming** | Output family `<main font> mod`, copyrights merged with `^n^n` separators |
+
+### Merge matrix (5×5)
+
+Main and base fonts are each classified as `static/variable × OTF/TTF` — 16 semantic combinations. **Rows = main font type, columns = base font type.**
+
+| | Static OTF base | Static TTF base | Variable OTF base | Variable TTF base |
+| :--- | :--- | :--- | :--- | :--- |
+| **Static OTF main** | *General*: multi-level merging, per-font independent scale/baseline offset | Asks the user whether to export TTF or OTF | Drops base glyphs whose **codepoint or name** already exists in main; the rest + only the OpenType features referencing surviving glyphs are merged into main (base auto-instanced to the default instance) | Converts the main OTF outlines to quadratic curves; then same as “Variable OTF main × Static OTF base” |
+| **Static TTF main** | Asks the user whether to export TTF or OTF | *General* | Converts the main TTF outlines to cubic curves; then same as “Variable OTF main × Static OTF base” | Same as “Variable OTF main × Static OTF base” |
+| **Variable OTF main** | Asks whether to export variable or static: ① Static → interpolate a font at the main’s axis values, then handle as static; ② Variable → drop base glyphs conflicting with main, merge main glyphs into the variable OTF’s default master, insert main’s OpenType features into each master | Same as left (static path) | *Master handling*: drop base glyphs conflicting in each master; merge base masters into main — same axis values → add glyphs/features to the main master, different axis values → create a new master. *Axis handling*: axis min/max = union; base-only axes are added (missing masters filled with default values) | Asks the user whether to export TTF or OTF; then same as “Variable OTF main × Variable OTF base” |
+| **Variable TTF main** | Asks whether to export variable or static (same as “Variable OTF main”; on the variable path main glyphs are converted to quadratic first) | Same as left (static path) | Asks TTF or OTF; then same as “Variable OTF main × Variable OTF base” | Same as “Variable OTF main × Variable OTF base” |
+
+### General rules (all combinations)
+
+1. **Multi-level chaining**: the result of main + first (n−1) base levels becomes the “main” of level n; already-asked questions are not asked again (memorized).
+2. **Naming**: Family becomes `<main font name> mod`; copyrights are written into all copyright fields (`^n^n`-separated); everything else follows the main font.
+3. **OpenType features**: the main font’s features are fully preserved; non-conflicting base language/feature tables can be kept wholesale (items referring to deleted glyphs are removed); on conflict, the main font wins.
+4. **Glyph retention**: all main-font glyphs are kept; base glyphs are merged only when **both codepoint and name** do not conflict with the main font.
+5. **Input formats**: WOFF/WOFF2 are unwrapped automatically; TTC/OTC must be unpacked first; other formats are rejected.
+
+> **Implementation status**: the “② Variable path” of a variable main font is supported (main VF preserved + axis union + base glyphs merged at the default instance). Per-axis *master-level interpolation composition* (base glyphs varying with the base’s axes) is **not yet implemented**.
+
+## Quick Start
+
+Requirements: **Python ≥ 3.8**, **FontTools ≥ 4.49**.
 
 ```bash
-# 交互模式（唯一入口）
+git clone https://github.com/ChangGGcn/font-matrix-merger.git
+cd font-matrix-merger
+pip install "fonttools>=4.49"
+
+# Interactive CLI
 python FontMerging.py
 ```
 
-交互流程：
-1. 输入主字体路径 + 缩放倍率(%) + 基线偏移
-2. 按 Y 结束前可输入任意级打底字体（各自独立缩放/偏移）
-3. 程序自动检测兼容性，提示警告（不兼容可确认继续）
-4. 遇到格式/可变性选择时交互询问（同一轮询问只问一次，之后自动复用答案）
-5. 输出 `<主字体>_mod.{otf|ttf}`
+The CLI is interactive: enter the main font path (plus scale % and baseline offset), then any number of base fonts (press `Y` to finish), and compatibility warnings can be confirmed with `y`. The output is written to `<main font>_mod.{otf|ttf}`.
 
-### 三字体输入输出样例（主 + 两级打底）
+### Three-font input/output example (main + 2 base levels)
 
 ```
 ========================================================
@@ -107,12 +159,13 @@ python FontMerging.py
   静态OTF, 1513 字形
 ```
 
-要点：
-- 第 1 级询问"导出格式"后，第 2 级同类询问自动复用答案（记忆机制）
-- 每级打底可独立指定缩放倍率与基线偏移
-- 兼容性警告仅提示，`y` 可确认继续
+Notes:
 
-### 编程接口
+- The export-format question asked at level 1 is **auto-answered** at level 2 (memorization).
+- Each base level can have its own scale % and baseline offset.
+- Compatibility warnings are informational; confirm with `y` to continue.
+
+### Library API
 
 ```python
 from FontMerger import FontMerger, apply_naming, get_family, get_copyrights
@@ -120,134 +173,33 @@ from FontMerger.format.static_extract import variable_to_static
 from fontTools.ttLib import TTFont
 
 merger = FontMerger()
-# 预设询问答案（非交互）
+# Pre-answer the interactive questions (non-interactive use)
 merger.mem = {"sOTF_sTTF": "OTF", "vOTF_sOTF": "可变"}
 
-# 合并
-r = merger.merge_two(main_font, base_font)          # 逐级
+# Level-by-level merge
+r = merger.merge_two(main_font, base_font)
 r = apply_naming(r, get_family(main_font), get_copyrights(main_font, base_font))
 r.save("merged.otf")
+
+# Or the one-line convenience helper
+from FontMerger import merge_fonts
+result = merge_fonts("main.otf", ["base1.otf", "base2.ttf"])
 ```
 
-## 合并矩阵（5×5）
+### Tests
 
-主/打底各按 `静态/可变 × OTF/TTF` 分类，共 16 种组合的语义定义；行 = 主字体类型，列 = 打底字体类型。
+`tests/generate_matrix.py` generates the full 16-combination matrix; `tests/test_merger.py` contains the unit tests. The test suite needs a local font collection (paths are resolved under `tests/../test/`) — the fonts themselves are **not redistributed** with the repository.
 
-|         | 静态OTF打底 | 静态TTF打底 | 可变OTF打底 | 可变TTF打底 |
-| :------ | :---------- | :---------- | :---------- | :---------- |
-| **静态OTF为主** | **通用**：多级打底合并、各字体独立缩放/基线偏移 | 询问用户导出为 TTF 还是 OTF | 将打底中与主字体已有字形**码位或名称**相同的字形删除；其余字形 + 仅与剩余字形相关的 OpenType 特性并入主字体（打底自动实例化为默认实例） | 将 OTF 中字形转换为二次曲线；随后同"可变OTF为主，静态OTF打底" |
-| **静态TTF为主** | 询问用户导出为 TTF 还是 OTF | **通用** | 将 TTF 中字形转换为三次曲线；随后同"可变OTF为主，静态OTF打底" | 同"可变OTF为主，静态OTF打底" |
-| **可变OTF为主** | 询问导出为可变还是静态：① 静态 → 插值得到与主字体轴值相同的静态字体，按静态处理；② 可变 → 删打底冲突字形，主字形加入可变OTF默认 Master，主字体 OpenType 特性插入各 Master | 同左（静态路径） | **Master 处理**：删打底各 Master 中冲突字形；打底各 Master 并入主——轴值相同则在主 Master 中增添字形与特性，轴值不同则新建 Master；**Axis 处理**：Axis 上下限取并集，打底独有 Axis 加入（缺失 Master 补默认值） | 询问导出为 TTF 还是 OTF；随后同"可变OTF为主，可变OTF打底" |
-| **可变TTF为主** | 询问导出为可变还是静态（同"可变OTF为主"；可变路径主字形转二次曲线后同左） | 同左（静态路径） | 询问导出为 TTF 还是 OTF；随后同"可变OTF为主，可变OTF打底" | 同"可变OTF为主，可变OTF打底" |
+## Known Limitations
 
-### 通用规则（所有组合）
-
-1. **多级打底**：主字体与前 (n−1) 级打底字体的结果作为第 n 级的"主字体"；已询问过的复杂情况不再询问（记忆）
-2. **名称**：Family 名改为 `<主字体名称> mod`；版权信息写入所有字体版权（`^n^n` 分隔）；其余信息与主字体相同
-3. **OpenType 特性**：主字体特性完全保留；打底与主不冲突的语言/特性表可完全保留（剔除与已删除字形相关的项）；冲突以主为准
-4. **字形保留**：主字体所有字形保留；打底仅"码位与名称均不与主字体冲突"的字形并入
-5. 输入 WOFF/WOFF2 自动解包；TTC/OTC 提示先解包；其他格式拒绝
-
-> **当前实现状态**（见"已知限制"）：可变主字体的"② 可变路径"已支持（主 VF 保留输出 + Axis 并集 + 打底字形并入）；"Master 处理"的逐轴插值合成尚未实现（打底字形统一取默认实例并入）。
-
-## 架构
-
-```
-FontMerger/
-├── FontMerging.py           # 交互式 CLI 主入口
-├── __init__.py              # 公共 API 导出
-├── core/
-│   ├── merger.py            # 16 路分派 + _do_merge 编排（CID/格式/轴并集/OT合并）
-│   ├── glyph_copy.py        # TTX XML 往返注入（CharString/glyf/hmtx/vmtx/HVAR）
-│   ├── conflict.py          # 码位/名称冲突检测
-│   └── naming.py            # 输出命名与版权处理
-├── format/
-│   ├── static_extract.py    # 可变→静态（CFF2→CFF + 重叠合并 + VORG 保留）
-│   ├── converter.py         # glyf↔CFF 转换
-│   ├── cid_convert.py       # CID↔name-keyed（rawDict 同步、vmtx、format14 UVS）
-│   ├── cid_merge.py         # 双 CID 合并（CID 偏移 + CharString 物化复制）
-│   ├── vf_axes.py           # Axis 并集（fvar/avar/STAT/varStore 同步）
-│   ├── transform.py         # 缩放+基线偏移（Pen 管线）
-│   ├── subsetter.py         # 字形子集化
-│   └── webfont.py           # WOFF/WOFF2 解包
-├── tables/
-│   ├── ot_merge.py          # GSUB/GPOS/GDEF 修剪+合并（Subsetter 闭包）
-│   └── base.py              # 逐表 merge 注册表（os2/head/post/hhea... 策略）
-├── tests/
-│   ├── generate_matrix.py   # 16 组合矩阵生成（v2 真路径）
-│   └── test_merger.py       # 核心测试
-└── build/                   # PyInstaller 打包配置
-```
-
-## 关键设计决策
-
-### 1. TTX 往返注入（而非 fontTools.merge）
-`fontTools.merge` 对 CID-keyed CFF 抛 `NotImplementedError`，故用 `saveXML → 注入字形 XML → ttx 编译` 的官方流程，对 CID/命名空间差异有完全控制。
-
-### 2. CID 统一策略
-- 双 CID（Adobe-Identity-0）：打底 CID 偏移（+主 max CID + 间隙），CharString 物化后直接复制 — 参考 afdko CIDKeyed UFO 的 CIDMap 重映射思想
-- 单 CID：输出统一 name-keyed（消除 ROS/FDSelect 命名空间冲突）
-- 关键坑：fontTools `BaseDict.__getattr__` 从 `rawDict` 读回，删除 ROS/FDArray 必须同时清 `rawDict`
-
-### 3. OpenType 特性合并
-- 打底布局表用 `fontTools.subset.Subsetter` 闭包修剪到"仅与存活字形相关"
-- lookup 追加时做索引重映射 + 字形引用校验（`uni0041`→`A`、`cidXXXX`→主等价名按码位映射）
-- 冲突（同 feature tag）以主为准
-
-### 4. Axis 并集
-- 共有轴取上下限并集；打底独有轴加入（fvar/avar/STAT 同步）
-- **varStore 必须同步**：CFF2/HVAR/MVAR/GDEF 每个 Region 追加恒定轴坐标 (0,0,0)，否则编译报 `RegionAxisCount` 不匹配
-
-### 5. 字体变换
-- 缩放/基线偏移用 `T2CharStringPen`/`TTGlyphPen` + `TransformPen` 重建轮廓（与 ufo2ft/varLib 同款官方管线）
-- CFF 先 `desubroutinize`；CFF2 先实例化展开 blend
-- 度量表（hmtx/vmtx/OS2/head/post/VORG）同步缩放
-
-## 测试与验证
-
-### 16 矩阵验证（`tests/generate_matrix.py`）
-```
-A1-A4  静态+静态    → static
-B1-B4  静态+可变    → static（打底自动实例化）
-C1     JP+拉丁(CID) → static（JP CID CFF2 主降级路径）
-C2-C4  可变+静态    → VAR（保留主 VF 轴）
-D1     JP+Serif    → static（JP CID CFF2 主降级路径）
-D2-D4  可变+可变    → VAR（Axis 并集，如 wght[50,1000] opsz[4,60] wdth[50,100]）
-```
-
-### HarfBuzz shaping 验证
-合并字体与主字体 kern/liga 逐项对比：
-- kern：`AVAT` on/off advance 与主**完全一致**（主优先语义正确）
-- liga：`ffi` 1 字形 vs 3 字形（连字生效）
-- 多级合并（主+2 打底）：kern/liga 均正确，GSUB/GPOS/GDEF 编译通过
-
-### 覆盖的难点案例
-- 双 CID 大字体合并（17944 字形 JP + 1464 字形 Serif）
-- CFF2 ↔ CFF 版本对齐（FDArray 重映射、HVAR VarIdxMap 补条目）
-- format 14 cmap (UVS) 重命名
-- 双 CFF2 合并的 vmtx 默认值补齐
-
-## 已知限制
-
-1. **JP（CID CFF2）作主字体**（C1/D1）：合并**可成功**（18600/18868 字形），但保存阶段打底 latin 的 cmap format 4 引用偶发不完整，矩阵采用**实例化静态路径**降级；如需真·可变输出需攻克 CFF2 CID 注入的更深层命名空间问题
-2. **Master 级插值合并**（打底字形随打底轴变动的融合）：当前实现为"打底默认实例并入主 VF"（打底字形在主 VF 各轴恒定），未做 varLib.build 式的多 Master 合成
-3. **OT 特性**：GSUB/GPOS 追加的打底 feature 引用的所有字形须存在于主字体（否则跳过）；GDEF 主优先
-4. **VORG**：默认轴位置实例化时 VORG 值不变（正确）；非默认位置需额外重算
-5. **多级打底的 OT 特性**：逐级合并时上级已并入的 feature 会被下级重复检测（幂等，但 lookup 可能冗余）
-
-## 依赖
-
-- Python ≥ 3.8
-- fontTools ≥ 4.49（`CFFToCFF2`、`scaleUpem`、`subset` 闭包）
-- 可选：afdko（未作为运行时依赖；`cid_convert` 参考其 CIDKeyed UFO 规范）
-
-## 打包
-
-```bash
-# PyInstaller（见 build/merge_fonts.spec）
-pyinstaller build/merge_fonts.spec
-```
+1. **JP (CID CFF2) as the main font** (matrix cells C1/D1): the merge itself succeeds (~18,600–18,868 glyphs), but the save stage can leave incomplete cmap format-4 references for base Latin glyphs; the matrix generator falls back to a static-instanced path. A true variable output requires solving deeper CFF2 CID namespace issues.
+2. **Master-level interpolation composition** (base glyphs varying along the base font’s axes) is not implemented: base glyphs are merged at the base’s default instance and are constant across the main VF’s axes.
+3. **OpenType features**: appended base features are merged only if all referenced glyphs exist in the main font (otherwise skipped); GDEF conflicts follow the main font.
+4. **VORG**: values are correct when instancing at the default axis position; non-default positions need recomputation.
+5. **Multi-level OT features**: a feature already merged at an earlier level is re-detected at later levels (idempotent, but lookups may become redundant).
+6. **Packaging**: the repository root is the package itself, so `pip install` from a clone is not wired up yet — clone-and-run for now; a PyPI-ready layout is planned.
+7. **Locally licensed fonts** (e.g. Helvetica Now Var, Founder and Hanyi typefaces) are used only for local testing and are intentionally excluded from this repository.
 
 ## License
 
-MIT（示例字体 Copyright 归各自作者，仅测试用）
+Released under the [MIT License](LICENSE). Sample fonts used for testing remain © their respective authors.
