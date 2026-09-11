@@ -48,7 +48,7 @@ FontMerger/
 | **格式互转** | CFF↔glyf（三次曲线↔二次曲线），CFF2→CFF（官方 `_convertCFF2ToCFF`）、CFF→CFF2 |
 | **CID 合并** | 双 CID：CID 偏移 + CharString 物化直接复制；CID↔name-keyed 转换（含 cmap format 14 UVS） |
 | **可变字体** | 主 VF 输出保持可变（CFF2/HVAR/STAT/fvar 完整保留并补全）；主/打底轴空间与 `avar` 一致时，打底字形的 `gvar` 增量一并保留（HVAR 由幽灵点重建） |
-| **跨设计空间合成** | 打底 `gvar` 增量重参数化到合并归一化空间（hat 精确分解），支持打底独有轴、不同范围/`avar`（用户空间钳制 + 精确拆 hat）；带自检门控与回退；策略参数 `compose_variations`/`compose_range`/`compose_fit`/`avar_mode` |
+| **跨设计空间合成** | 打底 `gvar` 增量**与布局变化数据**（`GDEF` `ItemVariationStore` + `GPOS` `VariationIndex` 设备）都重参数化到合并归一化空间（hat 精确分解），支持打底独有轴、不同范围/`avar`（用户空间钳制 + 精确拆 hat）；varStore **行保持** → 所有 `(outer, inner)` 引用无需重写；主字体自己的 varStore 同步重算；带自检门控与回退；策略参数 `compose_variations`/`compose_range`/`compose_fit`/`avar_mode`/`compose_layout` |
 | **Axis 并集** | 主/打底轴空间取并集；varStore（含 GDEF/HVAR/MVAR）恒定轴 Region 扩展 |
 | **OpenType 特性合并** | 打底 GSUB/GPOS/GDEF 用 Subsetter 闭包修剪后追加；同 tag feature **并成一条记录**，打底 Script/LangSys 一并并入（追加的 feature 才可达），FeatureList 重排后重写 `FeatureVariations` 索引，GDEF 字类/VarStore/MarkGlyphSets 取并集并重映射 `LookupFlag` bit4 的 `MarkFilteringSet` |
 | **缩放 + 基线偏移** | Pen 管线重建轮廓（T2CharStringPen/TTGlyphPen + TransformPen），度量同步 |
@@ -210,6 +210,7 @@ result = merge_fonts("main.otf", ["base.otf"], answers={"vOTF_sOTF": "静态"})
 | `compose_fit` | `"exact"` | `"exact"` = 打底元组精确拆到合并节点栅格上（逐点一致，元组更多）；`"affine"` = 在合并空间为每个元组拟合单个 hat（更紧凑，但实测偏差约 6 单位，通常被自检拒绝） |
 | `avar_mode` | `0` | `0` = 保留主字体 `avar`（最还原主字体设计师意图；默认点不同时用幽灵点插值补 master）；`1` = 弃用打底 `avar`、两者共用主字体 `avar`；`2` = 输出完全不带 `avar`（主字体 `avar` 把某段用户区间压成一个点时，可借此恢复打底的增量） |
 | `verify_compose` | `True` | 采用合成结果前，在合并轴的小网格上跑 `verify_composition()` 自检；不通过则告警并回退 |
+| `compose_layout` | `True` | 打底的**布局**变化数据（`GDEF` `ItemVariationStore` + `GPOS` `VariationIndex` 设备）一并重参数化并入，打底的 kerning/mark/anchor 变化在合并字体里继续生效；varStore 行保持 → 引用无需重写。关闭则回到旧行为（打底布局冻结在合并默认点） |
 
 ```python
 # 跨设计空间合并：打底带来自己的轴与 avar
@@ -254,7 +255,7 @@ merged = merge_subsets(paths, out_path="Merged.ttf", tag="ja", verify=True)
 ## 已知限制
 
 1. **JP（CID CFF2）作主字体**（矩阵 C1/D1）：合并本身成功（约 18,600~18,868 字形），但保存阶段打底拉丁字形在 cmap format 4 的引用偶发不完整；矩阵生成器降级走静态实例化路径。如需真·可变输出，需攻克 CFF2 CID 注入的更深层命名空间问题
-2. **跨设计空间的字形增量**：主/打底同为可变且**轴空间与 `avar` 完全一致**时（`axes_compatible()` 判定），打底 `gvar` 增量 1:1 搬入并用幽灵点重建 `HVAR`；轴空间不一致（轴集合/范围或 avar 不同）时走**合成**路径——由 `format/axis_mapping.py` 把打底增量重参数化到合并归一化空间，经 `verify_composition` 网格自检（容差 1 单位）通过才采用，否则透明回退到"打底按默认实例化"。该路径目前的缺口：(a) 要求主/打底**都是 `glyf`+`gvar`**，CFF2 打底仍回退实例化，CFF2 blend 合成尚未实现；(b) 合并后的 `avar` 是主字体的，若主轴把某段用户区间压成归一化空间的一个点（`collapsing_flats()`），打底在该区间的增量在 OT 模型下无法逐点还原——检测到会告警并保留主字体行为（可传 `avar_mode=2` 丢弃 `avar` 以恢复打底增量，代价是改变主字体的插值）；(c) 布局表的可变数据（`GDEF` `ItemVariationStore`）目前仍是静态并入，打底贡献的 kerning/mark 增量会冻结在打底默认点
+2. **跨设计空间的字形增量**：主/打底同为可变且**轴空间与 `avar` 完全一致**时（`axes_compatible()` 判定），打底 `gvar` 增量 1:1 搬入并用幽灵点重建 `HVAR`；轴空间不一致（轴集合/范围或 avar 不同）时走**合成**路径——由 `format/axis_mapping.py` 把打底增量重参数化到合并归一化空间，经 `verify_composition` 网格自检（容差 1 单位）通过才采用，否则透明回退到"打底按默认实例化"。该路径目前的缺口：(a) 要求主/打底**都是 `glyf`+`gvar`**，CFF2 打底仍回退实例化，CFF2 blend 合成尚未实现；(b) 合并后的 `avar` 是主字体的，若主轴把某段用户区间压成归一化空间的一个点（`collapsing_flats()`），打底在该区间的增量在 OT 模型下无法逐点还原——检测到会告警并保留主字体行为（可传 `avar_mode=2` 丢弃 `avar` 以恢复打底增量，代价是改变主字体的插值）；(c) 打底的布局变化数据也会搬入（`transfer_base_layout()`：`GDEF` `ItemVariationStore` + `GPOS` `VariationIndex`），但 VariationIndex 的增量是整数，重参数化后的列要取整，所以 kerning/anchor 变化可能有至多约 1 单位的偏差（实测 UPM 1000 下 Inter 的 kerning 为 0.70 单位）——可传 `compose_layout=False` 保持旧行为（打底布局冻结在合并默认点）；(d) 主字体自己的 varStore 只在轴空间真的变化时（`compose_range="union"`/`"main"` 或 `avar_mode != 0`）才重参数化，此时默认点的那一项由"恒定 region"（全轴峰值 0）承载
 3. **OpenType 特性**：追加的打底 feature 所引用字形必须存在于主字体（否则跳过该 lookup）。同 tag feature 并成一条记录；打底 Script/LangSys 一并并入（否则追加的 feature 不可达）；FeatureList 重排后重写 `FeatureVariations` 的 FeatureIndex（表本身保留，无法映射的记录才会被丢）；GDEF `GlyphClassDef`/`MarkAttachClassDef`/`MarkGlyphSetsDef` 与 `ItemVariationStore` 均取并集，并重映射 `LookupFlag` bit4 的 `MarkFilteringSet`。异源路径不并入**打底字体自己的** `FeatureVariations`（只保留主字体的）
 4. **VORG**：默认轴位置实例化时数值正确；非默认位置需额外重算
 5. **多级 OT 特性**：上级已并入的 feature 会在下级被重复检测（幂等，但 lookup 可能冗余）

@@ -1,9 +1,19 @@
 # -*- coding: utf-8 -*-
-"""跨设计空间的可变数据合成 (阶段 1: glyf/gvar + ItemVariationStore)
+"""跨设计空间的可变数据合成 (glyf/gvar + 布局变化数据)
 
-把打底可变字体的逐字形增量, 从其**自己的归一化空间**重参数化到合并字体的
-归一化空间, 使合并结果在合并设计空间的每一点上都等于"两个字体在该点实例的
-合并" (逐点等价, 见 format/axis_mapping.py 的数学基础)。
+把打底可变字体的可变数据 (逐字形 gvar 增量、布局的 ItemVariationStore),
+从其**自己的归一化空间**重参数化到合并字体的归一化空间, 使合并结果在合并
+设计空间的每一点上都等于"两个字体在该点实例的合并" (逐点等价, 见
+format/axis_mapping.py 的数学基础)。
+
+同一套数学覆盖两类数据, 区别只在"一个引用能承载几项":
+
+  * gvar: 一个字形**可以有多个元组**, 各项相加 → 直接把源 tuple 精确拆成
+    合并空间的多个 hat (reparametrize_gvar);
+  * ItemVariationStore: VariationIndex 的 (outer, inner) = (VarData 序号,
+    该 VarData 的**行号**), 引擎把这一行的增量向量与各列 region 标量做点积
+    —— 一行同样能承载多个 hat (列为 hat、行值为权重) → 也能精确重参数化
+    (reparametrize_var_store, **行保持**所以引用不必重写)。
 
 策略 (默认值即交互式 CLI 的行为):
   * range_policy="main+extra": 共有轴用主字体范围, 打底独有轴用打底范围;
@@ -13,7 +23,10 @@
   * fit="exact": 精确拆 hat (默认, 逐点零误差);
     "affine": 只映射支撑端点/峰 (体积最小, 有已知偏差, 高级参数);
   * 打底在合并默认位置的实例 (含幽灵点) 由 fontTools instancer 精确插值得到,
-    即"必要时插值出新 master"。
+    即"必要时插值出新 master";
+  * 布局: 打底布局的静态值由 MutatorMerger 折到合并默认点 (设备保留),
+    ItemVariationStore 换成"重参数化 - 默认点常数"的版本 (transfer_base_layout),
+    两者相加即逐点等价。
 """
 import copy
 import itertools
@@ -205,6 +218,74 @@ def _num_shorts(rows, orig=0):
             if abs(v) > limit:
                 n1 = max(n1, i + 1)
     return n1 | (0x8000 if long_words else 0)
+
+
+def fold_layout_default(base_font, mappings):
+    """把打底布局在**合并默认点**的取值折进静态值, 但保留 VariationIndex。
+
+    打底布局并进合并字体时, 静态值必须落在合并默认点上 (否则默认位置就是错的),
+    而 GPOS 的可变数据又要以"合并空间里的 hat"表达。用 fontTools 的官方机制
+    一次做完前半步:
+
+      * 合并默认点在打底归一化空间里是 T(0) (用户空间钳制后的值);
+      * instantiateItemVariationStore 在 (VarData, 行) 空间上求值, 得到每个
+        (outer, inner) 的默认增量 (**行保持**, 引用不用动);
+      * MutatorMerger(deleteVariations=False) 把默认增量加进 GPOS 的
+        Anchor/ValueRecord 与 GDEF LigCaretList 的静态值, 设备保留。
+
+    之后调用方把 GDEF 的 ItemVariationStore 换成 folded_default=True 的
+    重参数化版本 (即 φ_S(T(x)) - C), 两者相加就是逐点等价的布局。
+
+    Returns:
+        {tag: table} —— GDEF/GPOS/GSUB 的副本 (静态值已折默认点, 设备保留)
+    """
+    from fontTools.ttLib import TTFont
+    from fontTools.varLib.instancer import (NormalizedAxisLimits,
+                                            instantiateItemVariationStore)
+    from fontTools.varLib.merger import MutatorMerger
+
+    store = copy.deepcopy(base_font["GDEF"].table.VarStore)
+    location = {tag: float(m.to_source(0.0)) for tag, m in mappings.items()}
+    limits = NormalizedAxisLimits({tag: (v, v, v) for tag, v in location.items()})
+    default_deltas = instantiateItemVariationStore(store, base_font["fvar"].axes,
+                                                   limits)
+
+    work = TTFont()
+    work.setGlyphOrder(base_font.getGlyphOrder())
+    for tag in ("GDEF", "GPOS", "GSUB"):
+        if tag in base_font:
+            work[tag] = copy.deepcopy(base_font[tag])
+    work["GDEF"].table.VarStore = store            # 行保持; 区域已求值清空
+    merger = MutatorMerger(work, default_deltas, deleteVariations=False)
+    merger.mergeTables(work, [work], ["GDEF", "GPOS"])
+    del work["GDEF"].table.VarStore                # 新 store 由调用方挂上
+    return {tag: work[tag] for tag in ("GDEF", "GPOS", "GSUB") if tag in work}
+
+
+def transfer_base_layout(b_inst, base_font, mappings, merged_fvar):
+    """把打底的布局变化数据搬进"已按合并默认点实例化"的打底字体。
+
+    Returns:
+        report = {"grafted": bool, "var_data": n, "columns": (in, out)}
+    """
+    report = {"grafted": False, "var_data": 0, "columns": (0, 0)}
+    if "GDEF" not in base_font or "fvar" not in base_font:
+        return report
+    store = getattr(base_font["GDEF"].table, "VarStore", None)
+    if store is None:
+        return report
+    src_tags = [a.axisTag for a in base_font["fvar"].axes]
+    dst_tags = list(merged_fvar)
+    new_store, rep = reparametrize_var_store(store, mappings, src_tags, dst_tags,
+                                             folded_default=True)
+    for tag, table in fold_layout_default(base_font, mappings).items():
+        b_inst[tag] = table
+    b_inst["GDEF"].table.VarStore = new_store
+    b_inst["GDEF"].table.Version = max(0x00010003,
+                                       b_inst["GDEF"].table.Version or 0)
+    report.update({"grafted": True, "var_data": len(new_store.VarData),
+                   "columns": (rep["columns_in"], rep["columns_out"])})
+    return report
 
 
 def reparametrize_var_store(var_store, mappings, src_tags, dst_tags=None,

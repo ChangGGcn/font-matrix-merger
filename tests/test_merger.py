@@ -600,6 +600,148 @@ def test_compose_main_var_store_axes():
           % (len(new_vs.VarData), new_vs.VarRegionList.RegionCount))
 
 
+def _count_var_devices(font, min_outer=0):
+    """统计 GPOS/GSUB 里 DeltaFormat=0x8000 的设备数 (可只看 outer >= min_outer)"""
+    from fontTools.ttLib.tables import otTables as ot
+
+    counts = [0, 0]
+
+    def walk(obj, seen):
+        if id(obj) in seen:
+            return
+        seen.add(id(obj))
+        if isinstance(obj, (list, tuple)):
+            for v in obj:
+                walk(v, seen)
+            return
+        if isinstance(obj, ot.Device) and getattr(obj, "DeltaFormat", 0) == 0x8000:
+            counts[0] += 1
+            if obj.StartSize >= min_outer:
+                counts[1] += 1
+        d = getattr(obj, "__dict__", None)
+        if d:
+            for v in d.values():
+                walk(v, seen)
+
+    for tag in ("GPOS", "GSUB"):
+        if tag in font:
+            walk(font[tag].table, set())
+    return counts
+
+
+def test_compose_base_layout_variation():
+    """跨设计空间合成时, 打底的布局变化数据 (GDEF VarStore + GPOS 设备) 一并并入。
+
+    主 = ZedText 夹具 (wght), 打底 = InterVariable (opsz + wght)。判据:
+      * 合并后 GDEF VarStore 的 VarData 数 = 主的 + 打底的, 且 RegionAxisCount
+        与新 fvar 一致 (打底数据按合并空间重参数化, 行保持 → 设备引用有效);
+      * GPOS 里出现 outer >= 主的 VarData 数的设备 (即来自打底的那部分);
+      * 结构自检 _check_var_stores 干净, 保存/重载后依旧;
+      * compose_layout=False 作对照: 打底停在默认实例, 上述数据不出现。
+    """
+    main_p = _open_vf()
+    inter_p = os.path.join(_test_fonts_dir, "ttf_variable_fonts/InterVariable.ttf")
+    if not main_p or not os.path.exists(inter_p):
+        print("  test_compose_base_layout_variation: SKIP (测试字体未就位)")
+        return
+    from fontTools.ttLib.scaleUpem import scale_upem
+    from FontMerger.core.verify import _check_var_stores
+
+    main = TTFont(main_p)
+    base = TTFont(inter_p)
+    scale_upem(base, main["head"].unitsPerEm)
+    main_vd = len(main["GDEF"].table.VarStore.VarData)
+    base_vd = len(base["GDEF"].table.VarStore.VarData)
+    assert base_vd > 0
+
+    merger = FontMerger(verify_compose=False)
+    result = merger.merge_two(copy.deepcopy(main), copy.deepcopy(base))
+    vs = result["GDEF"].table.VarStore
+    assert len(vs.VarData) == main_vd + base_vd, (len(vs.VarData), main_vd, base_vd)
+    assert vs.VarRegionList.RegionAxisCount == len(result["fvar"].axes), vs
+    total, from_base = _count_var_devices(result, min_outer=main_vd)
+    assert from_base > 0, ("打底的 GPOS 设备没有并入", total)
+    assert not _check_var_stores(result), _check_var_stores(result)[:3]
+    buf = BytesIO()
+    result.save(buf)
+    again = TTFont(BytesIO(buf.getvalue()))
+    assert not _check_var_stores(again), _check_var_stores(again)[:3]
+    assert len(again["GDEF"].table.VarStore.VarData) == main_vd + base_vd
+
+    # 对照: 关闭布局变化数据搬运 → 打底停在默认实例
+    plain = FontMerger(verify_compose=False, compose_layout=False)
+    result2 = plain.merge_two(copy.deepcopy(main), copy.deepcopy(base))
+    vs2 = result2["GDEF"].table.VarStore
+    assert len(vs2.VarData) == main_vd, len(vs2.VarData)
+    _total2, from_base2 = _count_var_devices(result2, min_outer=main_vd)
+    assert from_base2 == 0, from_base2
+    print("  test_compose_base_layout_variation: GDEF %d+%d VarData, 打底设备 %d, PASSED"
+          % (main_vd, base_vd, from_base))
+
+
+def test_real_var_store_reparametrize():
+    """真实 ItemVariationStore 的重参数化: 逐 (VarData, 行) 与源语义一致。
+
+    用 InterVariable 的真实 GDEF VarStore 与 ZedText×Inter 的合并轴映射,
+    在合并空间随机采样位置 x: 重参数化后的行增量 (folded_default=True, 即
+    打底静态值已折默认点后的**残余变化量**) 必须复现源语义
+    Σ_c δ_c·φ_c(T(x)) - C。整数增量取整带来每列 ≤ 0.5 的误差。
+    """
+    main_p = _open_vf()
+    inter_p = os.path.join(_test_fonts_dir, "ttf_variable_fonts/InterVariable.ttf")
+    if not main_p or not os.path.exists(inter_p):
+        print("  test_real_var_store_reparametrize: SKIP (测试字体未就位)")
+        return
+    import random
+    from fontTools.ttLib.scaleUpem import scale_upem
+    from FontMerger.format.variation_compose import (plan_axis_space,
+                                                     reparametrize_var_store,
+                                                     _store_region_supports)
+    from FontMerger.format.axis_mapping import support_value
+
+    main = TTFont(main_p)
+    base = TTFont(inter_p)
+    scale_upem(base, main["head"].unitsPerEm)
+    merged_fvar, _avar, base_maps = plan_axis_space(main, base)
+    src_tags = [a.axisTag for a in base["fvar"].axes]
+    dst_tags = list(merged_fvar)
+    src_store = base["GDEF"].table.VarStore
+    new_store, rep = reparametrize_var_store(src_store, base_maps, src_tags,
+                                             dst_tags, folded_default=True)
+    assert new_store.VarRegionList.RegionAxisCount == len(dst_tags), rep
+    rows_in = sum(len(vd.Item) for vd in src_store.VarData)
+    rows_out = sum(len(vd.Item) for vd in new_store.VarData)
+    assert rows_in == rows_out, (rows_in, rows_out)      # 行保持
+    assert len(new_store.VarData) == len(src_store.VarData)
+
+    src_sups = _store_region_supports(src_store, src_tags)
+    new_sups = _store_region_supports(new_store, dst_tags)
+
+    def phi_src(region_idx, x):
+        """源 region 在合并位置 x 的标量 (经 T; 源数据只用到打底自己的轴)"""
+        sup = src_sups[region_idx]
+        loc = {tag: base_maps[tag].to_source(x[tag]) for tag in sup}
+        return support_value(loc, sup)
+
+    rng = random.Random(20240912)
+    worst = 0.0
+    for _ in range(24):
+        x = {tag: rng.uniform(-1.0, 1.0) for tag in dst_tags}
+        for vd_i, vd in enumerate(src_store.VarData):
+            nvd = new_store.VarData[vd_i]
+            for row_i in range(len(vd.Item)):
+                want = sum(vd.Item[row_i][c] * phi_src(r, x)
+                           for c, r in enumerate(vd.VarRegionIndex))
+                got = sum(nvd.Item[row_i][c] * support_value(x, new_sups[r])
+                          for c, r in enumerate(nvd.VarRegionIndex))
+                worst = max(worst, abs(want - got))
+    assert worst <= 1.0, worst
+    print("  test_real_var_store_reparametrize: %d VarData / %d 行, 列 %d → %d, "
+          "最大偏差 %.2f, PASSED"
+          % (len(new_store.VarData), rows_in, rep["columns_in"],
+             rep["columns_out"], worst))
+
+
 def main():
     print("FontMerger Test Suite")
     print("=" * 50)
@@ -616,6 +758,8 @@ def main():
         test_cross_design_space_composition,
         test_composition_fallback,
         test_compose_main_var_store_axes,
+        test_compose_base_layout_variation,
+        test_real_var_store_reparametrize,
     ]
 
     passed = 0

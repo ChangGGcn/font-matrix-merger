@@ -605,6 +605,8 @@ def _check_var_stores(font):
             return
         if isinstance(obj, ot.Device) and getattr(obj, "DeltaFormat", 0) == 0x8000:
             outer, inner = obj.StartSize, obj.EndSize
+            if (outer, inner) == (0xFFFF, 0xFFFF):
+                return                      # NO_VARIATION_INDEX: 合法的"无变化"
             if not 0 <= outer < n_var_data:
                 problems.append((tag, "VariationIndex.outer", outer, n_var_data))
             elif not 0 <= inner < gdef_vs.VarData[outer].ItemCount:

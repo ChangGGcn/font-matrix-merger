@@ -71,7 +71,9 @@ def offset_var_devices(obj, delta, seen=None):
         return
     seen.add(id(obj))
     if isinstance(obj, ot.Device):
-        if getattr(obj, "DeltaFormat", 0) == 0x8000:
+        # 0xFFFF/0xFFFF = NO_VARIATION_INDEX (无变化), 不能加偏移
+        if (getattr(obj, "DeltaFormat", 0) == 0x8000
+                and (obj.StartSize, obj.EndSize) != (0xFFFF, 0xFFFF)):
             obj.StartSize += delta
         return
     if isinstance(obj, dict):

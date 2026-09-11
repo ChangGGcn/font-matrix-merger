@@ -220,6 +220,27 @@ def _copy_name_records(src_font, dst_font, name_id):
             dst_font["name"].names.append(copy.deepcopy(rec))
 
 
+def _transfer_base_layout_once(b, base_font, plan):
+    """打底布局变化数据 (GDEF VarStore + GPOS VariationIndex) 并入实例化后的打底。
+
+    失败不影响主流程: 打底布局停在"合并默认点实例化"的状态 (即改动前的行为),
+    只打印告警 —— 布局变化数据的丢失远好于写出引用错乱的布局表。
+    """
+    from ..format.variation_compose import transfer_base_layout
+
+    try:
+        report = transfer_base_layout(b, base_font, plan["base_maps"],
+                                      plan["fvar"])
+    except Exception as e:
+        print(f"  [合成] 打底布局变化数据未并入 (保留默认实例): {e}")
+        return
+    if report["grafted"]:
+        print("  [合成] 打底布局变化数据: GDEF VarStore %d 个 VarData, "
+              "列 %d → %d (VariationIndex 行保持)"
+              % (report["var_data"], report["columns"][0],
+                 report["columns"][1]))
+
+
 def _map_main_var_stores(font, mappings, src_tags, dst_tags, label="合成"):
     """把主字体自己的 ItemVariationStore 重参数化到合并轴空间 (行保持)。
 
@@ -462,16 +483,20 @@ class FontMerger:
         avar_mode: 0=尊重主 avar (打底重参数化到主空间); 1=忽略打底 avar;
                    2=完全不用 avar
         verify_compose: 合成后跑网格采样自检, 不通过则回退到默认实例合并
+        compose_layout: 打底的布局变化数据 (GDEF ItemVariationStore + GPOS 的
+                   VariationIndex 设备) 一并重参数化并入 (默认 True)
     """
 
     def __init__(self, compose_variations=True, compose_range="main+extra",
-                 compose_fit="exact", avar_mode=0, verify_compose=True):
+                 compose_fit="exact", avar_mode=0, verify_compose=True,
+                 compose_layout=True):
         self.mem = {}
         self.compose_variations = compose_variations
         self.compose_range = compose_range
         self.compose_fit = compose_fit
         self.avar_mode = avar_mode
         self.verify_compose = verify_compose
+        self.compose_layout = compose_layout
 
     def ask(self, key, q, opts=None):
         if key in self.mem:
@@ -552,6 +577,8 @@ class FontMerger:
                 if plan is None:
                     raise RuntimeError("轴空间无法规划 (见 compose_range 参数)")
                 b = instance_at_merged_default(variable_source, plan["fvar"])
+                if self.compose_layout:
+                    _transfer_base_layout_once(b, variable_source, plan)
                 for tag, norm, lo, hi in _collapsing_flats(plan):
                     print(f"  [告警] 合并 avar 的轴 {tag} 把用户区间 "
                           f"[{lo:.0f}, {hi:.0f}] 压成归一化点 {norm:.3f}: "
