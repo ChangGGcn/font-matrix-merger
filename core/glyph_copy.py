@@ -206,23 +206,42 @@ def merge_glyphs_object(main_font, base_font, glyphs_to_add):
 
     order = list(result.getGlyphOrder())
     known = set(order)
-    planned = set(glyphs_to_add)
-    added = []
-    skipped = 0
-    for gn in glyphs_to_add:
-        if gn in known or gn in (".notdef",) or gn not in base_font.getGlyphOrder():
-            continue
-        glyph = copy.deepcopy(base_font["glyf"][gn])
-        if glyph.isComposite():
-            missing = [c.glyphName for c in glyph.components
-                       if c.glyphName not in known and c.glyphName not in planned]
-            if missing:
-                skipped += 1
+    base_order = list(base_font.getGlyphOrder())
+    base_names = set(base_order)
+
+    # 组件闭包: 复合字形的组件也必须在合并结果里 (组件名已在主字体中的除外,
+    # 它们直接解析到主字体的同名字形)。只按名取用会漏掉"被码位冲突删掉组件"
+    # 的那批复合字形 —— 旧 TTX 路径此时会在编译期报 KeyError 并整体放弃。
+    include = {gn for gn in glyphs_to_add
+               if gn in base_names and gn != ".notdef" and gn not in known}
+    changed = True
+    while changed:
+        changed = False
+        for gn in list(include):
+            glyph = base_font["glyf"][gn]
+            if not glyph.isComposite():
                 continue
+            for comp in glyph.components:
+                cname = comp.glyphName
+                if cname in base_names and cname not in include and cname not in known:
+                    include.add(cname)
+                    changed = True
+    # 保持打底字体的 GID 顺序 (Coverage/并行数组同序的前提)
+    ordered = [gn for gn in base_order
+               if gn in include and gn not in known]
+
+    added = []
+    for gn in ordered:
+        glyph = copy.deepcopy(base_font["glyf"][gn])
         result["glyf"][gn] = glyph
         result["hmtx"][gn] = base_font["hmtx"][gn]
-        if "vmtx" in result and "vmtx" in base_font and gn in base_font["vmtx"].metrics:
-            result["vmtx"][gn] = base_font["vmtx"][gn]
+        if "vmtx" in result:
+            # 主字体有 vmtx 时, 每个字形都必须有纵向度量, 否则编译期 KeyError。
+            # 打底没有该条目 (如拉丁字体无边表) → 补 (0,0), 与 TTX 路径一致。
+            if "vmtx" in base_font and gn in base_font["vmtx"].metrics:
+                result["vmtx"][gn] = base_font["vmtx"][gn]
+            else:
+                result["vmtx"][gn] = (0, 0)
         if "gvar" in base_font and "gvar" in result:
             variations = base_font["gvar"].variations.get(gn)
             if variations:
@@ -230,8 +249,6 @@ def merge_glyphs_object(main_font, base_font, glyphs_to_add):
         order.append(gn)
         known.add(gn)
         added.append(gn)
-    if skipped:
-        print(f"  [跳过] {skipped} 个复合字形的组件不在合并结果中")
     result.setGlyphOrder(order)
     if "maxp" in result:
         result["maxp"].numGlyphs = len(order)

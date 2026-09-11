@@ -226,8 +226,19 @@ def verify_merge(sources, merged, glyph_map=None, axis_positions="auto",
                         % (len(layout["dangling"]), layout["dangling"][:10]))
     if layout["unsorted_coverages"]:
         failures.append("Coverage 未按 GID 升序: %d 个" % layout["unsorted_coverages"])
-    log("  [布局] 悬空引用 %d, 未排序 Coverage %d"
-        % (len(layout["dangling"]), layout["unsorted_coverages"]))
+    if layout["bad_mark_filters"]:
+        failures.append("MarkFilteringSet 索引越界 %d 处: %s"
+                        % (len(layout["bad_mark_filters"]),
+                           layout["bad_mark_filters"][:3]))
+    if layout["bad_feature_variations"]:
+        failures.append("FeatureVariations 索引无效 %d 处: %s"
+                        % (len(layout["bad_feature_variations"]),
+                           layout["bad_feature_variations"][:3]))
+    log("  [布局] 悬空引用 %d, 未排序 Coverage %d, mark 集合越界 %d, "
+        "FeatureVariations 越界 %d"
+        % (len(layout["dangling"]), layout["unsorted_coverages"],
+           len(layout["bad_mark_filters"]),
+           len(layout["bad_feature_variations"])))
 
     # ---- 6. GDEF ----
     gdef_report = {"classes": 0, "mark_sets": 0, "var_store": False}
@@ -401,4 +412,48 @@ def _check_layout_integrity(font):
     for tag in ("GSUB", "GPOS", "GDEF"):
         if tag in font:
             walk(font[tag].table, set())
-    return {"dangling": sorted(dangling), "unsorted_coverages": unsorted_count}
+
+    # LookupFlag bit4 的 MarkFilteringSet 必须指向存在的 GDEF mark 集合
+    mark_sets = None
+    if "GDEF" in font:
+        mgs = getattr(font["GDEF"].table, "MarkGlyphSetsDef", None)
+        mark_sets = mgs.MarkSetCount if mgs is not None else 0
+    bad_mark_filters = []
+    for tag in ("GSUB", "GPOS"):
+        if tag not in font or not font[tag].table.LookupList:
+            continue
+        for i, lk in enumerate(font[tag].table.LookupList.Lookup):
+            if not (getattr(lk, "LookupFlag", 0) & 0x0010):
+                continue
+            idx = getattr(lk, "MarkFilteringSet", None)
+            if idx is None or not mark_sets or idx >= mark_sets:
+                bad_mark_filters.append((tag, i, idx, mark_sets or 0))
+
+    # FeatureVariations 的 FeatureIndex / 替换 lookup 索引必须有效
+    bad_feature_variations = []
+    for tag in ("GSUB", "GPOS"):
+        if tag not in font:
+            continue
+        table = font[tag].table
+        fv = getattr(table, "FeatureVariations", None)
+        if fv is None:
+            continue
+        n_feat = (len(table.FeatureList.FeatureRecord)
+                  if table.FeatureList else 0)
+        n_lookups = (len(table.LookupList.Lookup)
+                     if table.LookupList else 0)
+        for r_i, rec in enumerate(fv.FeatureVariationRecord):
+            fts = rec.FeatureTableSubstitution
+            for sub in (fts.SubstitutionRecord if fts else []):
+                if not 0 <= sub.FeatureIndex < n_feat:
+                    bad_feature_variations.append(
+                        (tag, r_i, "featureIndex", sub.FeatureIndex, n_feat))
+                for li in sub.Feature.LookupListIndex:
+                    if not 0 <= li < n_lookups:
+                        bad_feature_variations.append(
+                            (tag, r_i, "lookupIndex", li, n_lookups))
+
+    return {"dangling": sorted(dangling),
+            "unsorted_coverages": unsorted_count,
+            "bad_mark_filters": bad_mark_filters,
+            "bad_feature_variations": bad_feature_variations}

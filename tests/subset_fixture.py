@@ -50,3 +50,68 @@ def cached_subsets(src_path, n=3, flavor="woff2"):
     if key not in _CACHE:
         _CACHE[key] = make_subsets(src_path, n=n, flavor=flavor)
     return list(_CACHE[key])
+
+
+def make_rich_vf(src_path, out_dir=None, mark_glyphs=40):
+    """给可变字体补上"容易被合并搞坏"的两样东西后另存, 返回路径。
+
+      * GDEF MarkGlyphSetsDef 追加一个新 Coverage, 并把某个 GPOS lookup 的
+        LookupFlag bit4 (UseMarkFilteringSet) 指向它 —— 合并后索引必须重映射;
+      * GSUB FeatureVariations (rvrn) —— FeatureList 重排后索引必须重写。
+
+    两者都是 fontTools 官方 API 生成的合法结构:
+      otTables.MarkGlyphSetsDef / varLib.featureVars.addFeatureVariations。
+    """
+    from fontTools.ttLib import TTFont
+    from fontTools.ttLib.tables import otTables as ot
+    from fontTools.varLib.featureVars import addFeatureVariations
+
+    font = TTFont(src_path)
+    order = font.getGlyphOrder()
+    cmap = font.getBestCmap()
+
+    # ---- MarkGlyphSetsDef + LookupFlag bit4 ----
+    gdef = font["GDEF"].table
+    if getattr(gdef, "MarkGlyphSetsDef", None) is None:
+        mgs = ot.MarkGlyphSetsDef()
+        mgs.MarkSetTableFormat = 1
+        mgs.Coverage = []
+        mgs.MarkSetCount = 0
+        gdef.MarkGlyphSetsDef = mgs
+    mgs = gdef.MarkGlyphSetsDef
+    names = [cmap[cp] for cp in sorted(cmap)[:mark_glyphs] if cmap[cp] in order]
+    cov = ot.Coverage()
+    cov.glyphs = sorted(set(names), key=order.index)
+    mgs.Coverage.append(cov)                     # 追加 (不是替换!)
+    mgs.MarkSetCount = len(mgs.Coverage)
+    gdef.Version = max(gdef.Version or 0x00010000, 0x00010002)
+
+    if "GPOS" in font and font["GPOS"].table.LookupList:
+        lk = font["GPOS"].table.LookupList.Lookup[0]
+        lk.LookupFlag = (getattr(lk, "LookupFlag", 0) or 0) | 0x0010
+        lk.MarkFilteringSet = mgs.MarkSetCount - 1
+
+    # ---- FeatureVariations (rvrn): 任意两个存在字形 ----
+    glyphs = [cmap[cp] for cp in sorted(cmap) if cmap[cp] in order]
+    src_gn = glyphs[0]
+    dst_gn = next(g for g in glyphs[1:] if g != src_gn)
+    addFeatureVariations(font, [([{"wght": (0.5, 1.0)}], {src_gn: dst_gn})],
+                         featureTag="rvrn")
+
+    out_dir = out_dir or tempfile.mkdtemp(prefix="fm_rich_")
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, "rich-vf.ttf")
+    font.save(out)
+    return out
+
+
+def cached_rich_subsets(src_path, n=2, flavor="woff2"):
+    """(rich VF 路径, 其分片列表); 字体不存在返回 (None, None)"""
+    if not src_path or not os.path.exists(src_path):
+        return None, None
+    key = ("rich", src_path, n, flavor)
+    if key not in _CACHE:
+        rich = make_rich_vf(src_path)
+        _CACHE[key] = (rich, make_subsets(rich, n=n, flavor=flavor))
+    rich, paths = _CACHE[key]
+    return rich, list(paths)

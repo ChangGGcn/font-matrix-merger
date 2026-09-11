@@ -22,12 +22,15 @@ from fontTools.ttLib import TTFont
 
 from FontMerger import (FontMerger, is_same_source, is_variable, merge_subsets,
                         verify_merge, save_font)
-from tests.subset_fixture import cached_subsets
+from FontMerger.core.verify import _check_layout_integrity
+from tests.subset_fixture import cached_subsets, cached_rich_subsets
 
 #: OFL 可变 TTF: 带 gvar/HVAR/VVAR/GDEF VarStore/vert/vrt2/kern/mark
 _VF_TTF = "ttf_variable_fonts/ZedTextJapaneseVF.ttf"
 #: OFL 静态字体 (异源合并用)
 _STATIC_TTF = "TrueType/LXGWWenKaiTC-Regular.ttf"
+#: OFL CFF2 可变字体 (CFF2 分片并集用)
+_CFF2_VF = "otf_variable_fonts/SourceSerif4Variable-Roman.otf"
 
 
 def _vf():
@@ -171,6 +174,48 @@ def test_merge_subsets_verify():
           % report["checks"]["glyphs"]["compared"])
 
 
+def test_merge_subsets_cff2():
+    """CFF2 分片并集: CharStrings/blend/vsindex/FDSelect/HVAR 全部保留。
+
+    判据用 verify_merge 在 **多个轴位置** 逐字形比对 —— 非默认位置的轮廓
+    完全依赖 CFF2 的 blend/vsindex, 能过就说明增量数据没丢。
+    """
+    src = os.path.join(_test_fonts_dir, _CFF2_VF)
+    if not os.path.exists(src):
+        print("  test_merge_subsets_cff2: SKIP (测试字体未就位)")
+        return
+    paths = cached_subsets(src, n=3)
+    merged = merge_subsets(paths, tag="c", verbose=False)
+
+    assert "CFF2" in merged and "glyf" not in merged, "输出不是 CFF2"
+    assert is_variable(merged), "可变性丢失"
+    src_font = TTFont(src)
+    missing_cp = set(src_font.getBestCmap()) - set(merged.getBestCmap())
+    assert not missing_cp, "码位缺失 %d 个" % len(missing_cp)
+
+    # HVAR 的 DeltaSetIndexMap 必须覆盖全部字形 (fontTools preWrite 会 KeyError)
+    assert "HVAR" in merged
+    hmap = merged["HVAR"].table.AdvWidthMap.mapping
+    assert all(gn in hmap for gn in merged.getGlyphOrder()), \
+        "HVAR 映射不完整"
+
+    # 落盘 + 重载 + 多轴位置自检
+    out_dir = tempfile.mkdtemp(prefix="fm_cff2_")
+    out = os.path.join(out_dir, "merged.otf")
+    save_font(merged, out)
+    with open(out, "rb") as fh:
+        assert fh.read(4) == b"OTTO"
+    again = TTFont(out)
+    report = verify_merge(paths, again,
+                          glyph_map=merged.subset_merger.glyph_map(),
+                          sample=120, verbose=False)
+    assert report["ok"], "自检失败: %s" % report["failures"]
+    assert report["checks"]["glyphs"]["compared"] > 0
+    print("  test_merge_subsets_cff2: %d 字形, 比对 %d, PASSED"
+          % (len(merged.getGlyphOrder()),
+             report["checks"]["glyphs"]["compared"]))
+
+
 def test_merge_subsets_rejects_foreign():
     """异源字体不能走 merge_subsets"""
     paths = _subsets()
@@ -204,6 +249,63 @@ def test_glyph_map_covers_sources():
     print("  test_glyph_map_covers_sources: PASSED")
 
 
+def test_subset_merge_preserves_mark_sets_and_fv():
+    """GDEF MarkGlyphSetsDef 的 LookupFlag bit4 索引与 GSUB FeatureVariations
+    的 FeatureIndex 在合并/重排后必须仍指向正确目标。"""
+    rich, paths = cached_rich_subsets(_vf(), n=2)
+    if not paths:
+        print("  test_subset_merge_preserves_mark_sets_and_fv: SKIP (测试字体未就位)")
+        return
+
+    merged = merge_subsets(paths, tag="t", verbose=False)
+    report = _check_layout_integrity(merged)
+    assert not report["bad_mark_filters"],         "MarkFilteringSet 越界: %s" % report["bad_mark_filters"][:3]
+    assert not report["bad_feature_variations"],         "FeatureVariations 索引无效: %s" % report["bad_feature_variations"][:3]
+
+    src_fv = [p for p in paths
+              if getattr(TTFont(p)["GSUB"].table, "FeatureVariations", None)
+              is not None]
+    merged_fv = getattr(merged["GSUB"].table, "FeatureVariations", None)
+    assert merged_fv is not None, "分片带 FeatureVariations 却丢失了"
+    assert len(merged_fv.FeatureVariationRecord) >= 1
+
+    # 语义检查: 分片 mark 集合覆盖的字形 (经 glyph_map 映射) 必须落在合并后
+    # 被引用集合的 Coverage 里
+    gmap = merged.subset_merger.glyph_map()
+    order = merged.getGlyphOrder()
+    labels = [os.path.basename(p) for p in paths]
+    mgs = merged["GDEF"].table.MarkGlyphSetsDef
+    merged_sets = [set(c.glyphs) for c in mgs.Coverage]
+    checked = 0
+    for label, p in zip(labels, paths):
+        sub = TTFont(p)
+        sg = sub["GDEF"].table.MarkGlyphSetsDef if "GDEF" in sub else None
+        if sg is None:
+            continue
+        for cov_dict in [None]:
+            pass
+        for cov in sg.Coverage:
+            mapped = {order[gmap[label][g]] for g in cov.glyphs
+                      if g in gmap.get(label, {})}
+            if not mapped:
+                continue
+            assert any(mapped <= s for s in merged_sets),                 "分片 %s 的 mark 集合没有对应到合并后任一集合" % label
+            checked += 1
+    assert checked, "用例无效: 分片没有 mark 集合"
+
+    # 落盘 + 重载后索引仍是二进制里的真实索引
+    out_dir = tempfile.mkdtemp(prefix="fm_fv_")
+    out = os.path.join(out_dir, "merged.ttf")
+    save_font(merged, out)
+    again = TTFont(out)
+    rep2 = _check_layout_integrity(again)
+    assert not rep2["bad_mark_filters"] and not rep2["bad_feature_variations"],         "重载后索引失效: %s %s" % (rep2["bad_mark_filters"],
+                                  rep2["bad_feature_variations"])
+    print("  test_subset_merge_preserves_mark_sets_and_fv: "
+          "mark 集合 %d, FV 记录 %d, PASSED"
+          % (len(merged_sets), len(merged_fv.FeatureVariationRecord)))
+
+
 def main():
     print("FontMerger merge_subsets Test Suite")
     print("=" * 50)
@@ -214,6 +316,8 @@ def main():
         test_merge_subsets_verify,
         test_merge_subsets_rejects_foreign,
         test_glyph_map_covers_sources,
+        test_subset_merge_preserves_mark_sets_and_fv,
+        test_merge_subsets_cff2,
     ]
     passed = 0
     for test in tests:

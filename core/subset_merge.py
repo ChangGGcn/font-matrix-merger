@@ -26,10 +26,16 @@
   10 name 表补全 (16/17/25 + 实例 PS 名); head.flags 清 woff2 残留位
   11 重算 head/hhea/vhea/maxp/OS/2 度量
 
-限制:
-  * 只支持 glyf 轮廓 (CFF2 分片请先用 convert 流程);
-  * 源字体若带 FeatureVariations, 合并时会丢弃 (同源分片通常没有);
-  * MarkGlyphSetsDef 按内容去重, 但不去重 VarData。
+轮廓支持:
+  * glyf: 逐字形复制 glyf/hmtx/vmtx/gvar, HVAR 由 gvar 幽灵点重建;
+  * CFF2: 逐字形复制 CharStrings + FDSelect, FDArray 按内容去重并集
+    (blend/vsindex 原样保留), HVAR/VVAR 做 VarStore 并集 + 索引重定位。
+    要求各分片共享同一 CFF2 VarStore / GlobalSubrs 结构 (见
+    format/cff2_union.py); 结构被重构过时明确报错而不是产出坏字体。
+
+特性:
+  * GSUB/GPOS 同 tag feature 并集 + ScriptList 并入 + FeatureVariations
+    索引重写; GDEF 字类/MarkGlyphSets/VarStore 并集, VariationIndex 重定位。
 
 用法:
     from FontMerger import merge_subsets
@@ -44,20 +50,27 @@ from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
 from fontTools.ttLib.tables.otTables import NO_VARIATION_INDEX
 
 from .glyph_rename import alias_name
-from ..tables.layout_union import (LayoutUnion, layout_glyph_names,
-                                   remap_glyph_names, resort_layout)
+from ..format.cff2_union import (FDUnion, IncompatibleCFF2Error,
+                                 check_cff2_compatible,
+                                 copy_glyphs as copy_cff2_glyphs,
+                                 sync_glyph_order)
+from ..tables.layout_union import (LayoutUnion, MarkGlyphSetUnion,
+                                   layout_glyph_names, remap_glyph_names,
+                                   resort_layout)
 from ..tables.varstore import VarStoreUnion
 from ..utils.detect import is_auto_glyph_name, is_cff, is_same_source, type_label
 from ..utils.save import save_font, default_flavor_for
 
 #: 需要强制加载的逐字形表 (改字形序之前必须先读出来)
 _PER_GLYPH_TABLES = ("glyf", "hmtx", "vmtx", "gvar", "cmap", "HVAR", "VVAR")
+_PER_GLYPH_TABLES_CFF2 = ("CFF2", "hmtx", "vmtx", "cmap", "HVAR", "VVAR")
 
 #: cmap 子表格式 → 可容纳的最大码位
 _CMAP_LIMITS = {0: 0xFF, 4: 0xFFFF, 6: 0xFFFF, 12: 0x10FFFF}
 
-#: VVAR 里按字形索引的 DeltaSetIndexMap
+#: VVAR / HVAR 里按字形索引的 DeltaSetIndexMap
 _VVAR_MAPS = ("AdvHeightMap", "TsbMap", "BsbMap", "VOrgMap")
+_HVAR_MAPS = ("AdvWidthMap", "LsbMap", "RsbMap")
 
 
 def _copy_cmap_subtable(dst_font, src_st, fmt, sub_idx):
@@ -83,10 +96,12 @@ class SameSourceSubsetMerger:
         self.verbose = verbose
         self.var_store = VarStoreUnion()      # GDEF ItemVariationStore
         self.vvar_store = VarStoreUnion()     # VVAR 自己的 ItemVariationStore
+        self.hvar_store = VarStoreUnion()     # HVAR 自己的 ItemVariationStore
+        self.fd_union = None                  # CFF2: FDArray 并集
+        self.cff2 = False
         self.gdef_class_defs = {}
         self.mark_attach_class_defs = {}
-        self.mark_glyph_sets = []
-        self._mark_set_index = {}
+        self.mark_union = MarkGlyphSetUnion()
         self.attach_list = None
         self.lig_caret_list = None
         self.layout = {"GSUB": LayoutUnion("GSUB"), "GPOS": LayoutUnion("GPOS")}
@@ -102,6 +117,32 @@ class SameSourceSubsetMerger:
     def log(self, *args):
         if self.verbose:
             print(*args, flush=True)
+
+    # ------------------------------------------------------------------
+    # CFF2
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _check_cff2(subsets):
+        """CFF2 分片: 必须是同源结构 (FDArray/VarStore/GlobalSubrs 一致)。
+
+        CFF2 的 blend/vsindex 与 FDSelect 都是**索引**, 分片结构被重构过
+        (如 pyftsubset 剪过 FDArray/VarData) 就必须做基址重定位才能并集 ——
+        那属于另一条实现路径, 这里明确拒绝, 避免产出坏字体。
+        """
+        for f in subsets:
+            if "CFF2" not in f:
+                raise NotImplementedError(
+                    "merge_subsets: CFF/CFF2 混合或纯 CFF1 分片暂不支持")
+        for i, f in enumerate(subsets[1:], 1):
+            ok, reason = check_cff2_compatible(subsets[0], f)
+            if not ok:
+                raise NotImplementedError(
+                    "merge_subsets: 分片 %d 无法零重定位并集 — %s" % (i, reason))
+
+    @staticmethod
+    def _copy_cff2_glyphs(merged, base, pairs, fd_map=None):
+        """复制打底 CFF2 字形 (CharStrings + FDSelect), 返回复制的最终名。"""
+        return copy_cff2_glyphs(merged, base, pairs, fd_map)
 
     # ------------------------------------------------------------------
     # 改名表
@@ -142,9 +183,9 @@ class SameSourceSubsetMerger:
         subsets = list(subsets)
         if not subsets:
             raise ValueError("merge_subsets: 至少需要 1 个分片")
-        if any(is_cff(f) for f in subsets):
-            raise NotImplementedError(
-                "merge_subsets 目前只支持 glyf 轮廓的分片 (CFF2 分片暂不支持)")
+        self.cff2 = is_cff(subsets[0])
+        if self.cff2:
+            self._check_cff2(subsets)
         if len(subsets) > 1 and not is_same_source(subsets):
             raise ValueError(
                 "merge_subsets: 输入不是同源分片 (fvar 轴空间或轮廓格式不一致); "
@@ -152,11 +193,14 @@ class SameSourceSubsetMerger:
         self.subset_labels = list(labels) if labels else [str(i) for i in range(len(subsets))]
 
         merged = subsets[0]
-        for tag in _PER_GLYPH_TABLES:
+        for tag in (_PER_GLYPH_TABLES_CFF2 if self.cff2 else _PER_GLYPH_TABLES):
             if tag in merged:
                 merged[tag]
-        # 复合字形惰性持有组件 GID: 必须在字形序改变之前展开
-        merged["glyf"].ensureDecompiled()
+        if not self.cff2:
+            # 复合字形惰性持有组件 GID: 必须在字形序改变之前展开
+            merged["glyf"].ensureDecompiled()
+        else:
+            self.fd_union = FDUnion(merged["CFF2"].cff.topDictIndex[0])
 
         merged_order = list(merged.getGlyphOrder())
         merged_names = set(merged_order)
@@ -174,8 +218,8 @@ class SameSourceSubsetMerger:
                 ren = {gn: gn for gn in base.getGlyphOrder()}
                 to_add = []
             else:
-                # 展开打底字形 (组件名按**打底自己的**字形序解析), 再算改名表
-                if "glyf" in base:
+                if not self.cff2 and "glyf" in base:
+                    # 展开打底字形 (组件名按**打底自己的**字形序解析)
                     base["glyf"].ensureDecompiled()
                 ren = self.rename_map(base, merged_names, self.tag, index,
                                       layout_glyph_names(base))
@@ -187,7 +231,6 @@ class SameSourceSubsetMerger:
                           if ren.get(gn, gn) not in merged_names]
             self.subset_renames.append(ren)
             self.subset_orders.append(list(base.getGlyphOrder()))
-
             cmap_before = self.stats["cmap_added"]
 
             # GDEF 先做: GPOS 的 VariationIndex 依赖本分片的 VarData 基址
@@ -196,39 +239,63 @@ class SameSourceSubsetMerger:
             if "GDEF" in base:
                 var_offset, mark_set_remap = self._merge_gdef(base["GDEF"].table, ren)
 
-            added = 0
+            # ---- 轮廓 (glyf 对象复制 / CFF2 对象复制) ----
+            pairs = []          # (打底字形名, 合并后字形名)
+            if self.cff2:
+                for old in to_add:
+                    new = ren.get(old, old)
+                    if new not in merged_names:
+                        pairs.append((old, new))
+                if pairs:
+                    fd_map = self.fd_union.add(base["CFF2"].cff.topDictIndex[0])
+                    self._copy_cff2_glyphs(merged, base, pairs, fd_map)
+            else:
+                for old in to_add:
+                    new = ren.get(old, old)
+                    if new in merged_names:
+                        continue
+                    glyph = copy.deepcopy(base["glyf"][old])
+                    if glyph.isComposite():
+                        for comp in glyph.components:
+                            comp.glyphName = ren.get(comp.glyphName,
+                                                     comp.glyphName)
+                    # 直接写 glyphs 字典: glyf.__setitem__ 会顺手 append 到
+                    # glyf.glyphOrder —— 而该列表就是 merged_order 本体 (setGlyphOrder
+                    # 传的是引用), 会与本循环的 append 重复。末尾统一 setGlyphOrder。
+                    merged["glyf"].glyphs[new] = glyph
+                    if "gvar" in base and "gvar" in merged:
+                        variations = base["gvar"].variations.get(old)
+                        if variations:
+                            merged["gvar"].variations[new] = copy.deepcopy(variations)
+                    pairs.append((old, new))
+
+            # ---- 度量 / 变体映射 (两条路径共用) ----
             added_names = set()
-            for old in to_add:
-                new = ren.get(old, old)
-                if new in merged_names:
-                    continue
+            for old, new in pairs:
                 added_names.add(new)
                 merged_order.append(new)
                 merged_names.add(new)
-                glyph = copy.deepcopy(base["glyf"][old])
-                if glyph.isComposite():
-                    for comp in glyph.components:
-                        comp.glyphName = ren.get(comp.glyphName, comp.glyphName)
-                merged["glyf"][new] = glyph
                 merged["hmtx"][new] = base["hmtx"][old]
-                if "vmtx" in merged and "vmtx" in base:
-                    merged["vmtx"][new] = base["vmtx"][old]
-                if "gvar" in base and "gvar" in merged:
-                    variations = base["gvar"].variations.get(old)
-                    if variations:
-                        merged["gvar"].variations[new] = copy.deepcopy(variations)
-                added += 1
+                if "vmtx" in merged:
+                    # 主字体有 vmtx 时每个字形都必须有纵向度量, 否则编译期 KeyError
+                    if "vmtx" in base and old in base["vmtx"].metrics:
+                        merged["vmtx"][new] = base["vmtx"][old]
+                    else:
+                        merged["vmtx"][new] = (0, 0)
 
-            # VVAR: 本分片的 VarData 基址 + 逐个字形重定位
+            # HVAR/VVAR: 本分片的 VarData 基址 + 逐个字形重定位
             vvar_offset = 0
             if "VVAR" in base and "VVAR" in merged:
                 vvar_offset = self.vvar_store.add(base["VVAR"].table.VarStore)
+            hvar_offset = 0
+            if "HVAR" in base and "HVAR" in merged:
+                hvar_offset = self.hvar_store.add(base["HVAR"].table.VarStore)
 
             self._merge_cmap(merged, base, merged_sub_idx, ren, merged_names,
                              merged_cmap)
-            if index > 0 and "VVAR" in base and "VVAR" in merged:
-                self._merge_vvar_maps(merged, base, ren, vvar_offset,
-                                      added_names)
+            if index > 0 and added_names:
+                self._merge_variation_maps(merged, base, ren, vvar_offset,
+                                           hvar_offset, added_names)
 
             for table_tag, state in self.layout.items():
                 if table_tag in base:
@@ -236,9 +303,9 @@ class SameSourceSubsetMerger:
                                    var_offset=var_offset,
                                    mark_set_remap=mark_set_remap)
 
-            self.stats["glyphs_added"] += added
+            self.stats["glyphs_added"] += len(added_names)
             merged.setGlyphOrder(merged_order)
-            self.log(f"  [{index:3d}] +{added:4d} 字形, cmap +"
+            self.log(f"  [{index:3d}] +{len(added_names):4d} 字形, cmap +"
                      f"{self.stats['cmap_added'] - cmap_before}")
 
         merged.setGlyphOrder(merged_order)
@@ -258,11 +325,15 @@ class SameSourceSubsetMerger:
         self._finalize_gdef(merged)
         # GDEF 是重建的 (AttachList/LigCaretList 来自暂存副本), 重新按新字形序排序
         resort_layout(merged)
+        if self.cff2:
+            # CFF2 没有 charset 表: 编译按 top.charset 顺序取 CharStrings,
+            # charset / FDSelect 必须与最终字形序一致
+            sync_glyph_order(merged)
         self._harmonize_cmap(merged, merged_cmap)
         merged["cmap"].tables.sort(key=lambda st: (st.platformID, st.platEncID))
         self.stats["cmap_subtables"] = len(merged["cmap"].tables)
 
-        self._finalize_vvar(merged)
+        self._finalize_variation_maps(merged)
 
         if "gvar" in merged and "fvar" in merged:
             from fontTools.varLib.hvar import add_HVAR
@@ -321,9 +392,9 @@ class SameSourceSubsetMerger:
     # ------------------------------------------------------------------
     def _reorder_by_codepoint(self, merged, cmap_map):
         old_order = merged.getGlyphOrder()
-        glyf_table = merged["glyf"]
-        # 仍在惰性持有组件 GID 的字形, 趁当前字形序还有效先展开 (P5)
-        glyf_table.ensureDecompiled()
+        if "glyf" in merged:
+            # 仍在惰性持有组件 GID 的字形, 趁当前字形序还有效先展开 (P5)
+            merged["glyf"].ensureDecompiled()
         cp_of = {}
         for cp, gn in cmap_map.items():
             if gn not in cp_of or cp < cp_of[gn]:
@@ -347,16 +418,9 @@ class SameSourceSubsetMerger:
         if getattr(gdef, "MarkAttachClassDef", None) is not None:
             for gn, cls in (gdef.MarkAttachClassDef.classDefs or {}).items():
                 self.mark_attach_class_defs.setdefault(ren.get(gn, gn), cls)
-        mark_remap = []
-        if getattr(gdef, "MarkGlyphSetsDef", None) is not None:
-            for cov in gdef.MarkGlyphSetsDef.Coverage:
-                glyphs = tuple(sorted(ren.get(g, g) for g in cov.glyphs if True))
-                idx = self._mark_set_index.get(glyphs)
-                if idx is None:
-                    idx = len(self.mark_glyph_sets)
-                    self._mark_set_index[glyphs] = idx
-                    self.mark_glyph_sets.append(list(glyphs))
-                mark_remap.append(idx)
+        # MarkGlyphSetsDef 并集 (共享 MarkGlyphSetUnion: 内容去重 + 索引重映射)
+        mark_remap = self.mark_union.add(
+            getattr(gdef, "MarkGlyphSetsDef", None), remap_name=ren)
         if getattr(gdef, "AttachList", None) is not None and self.attach_list is None:
             self.attach_list = copy.deepcopy(gdef.AttachList)
             remap_glyph_names(self.attach_list, ren)
@@ -367,7 +431,7 @@ class SameSourceSubsetMerger:
         return self.var_store.add(getattr(gdef, "VarStore", None)), tuple(mark_remap)
 
     def _finalize_gdef(self, merged):
-        if not (self.gdef_class_defs or self.mark_glyph_sets
+        if not (self.gdef_class_defs or self.mark_union
                 or self.mark_attach_class_defs or self.attach_list
                 or self.lig_caret_list or self.var_store.var_data):
             if "GDEF" in merged:
@@ -378,7 +442,7 @@ class SameSourceSubsetMerger:
         # Version 门槛: 1.2 才有 MarkGlyphSetsDef, 1.3 才有 VarStore
         if self.var_store.var_data:
             gdef.Version = 0x00010003
-        elif self.mark_glyph_sets:
+        elif self.mark_union:
             gdef.Version = 0x00010002
         else:
             gdef.Version = 0x00010000
@@ -394,18 +458,8 @@ class SameSourceSubsetMerger:
             cd = ot.ClassDef()
             cd.classDefs = dict(self.mark_attach_class_defs)
             gdef.MarkAttachClassDef = cd
-        gdef.MarkGlyphSetsDef = None
-        if self.mark_glyph_sets:
-            order_index = {g: i for i, g in enumerate(merged.getGlyphOrder())}
-            mgs = ot.MarkGlyphSetsDef()
-            mgs.MarkSetTableFormat = 1
-            mgs.Coverage = []
-            for glyphs in self.mark_glyph_sets:
-                cov = ot.Coverage()
-                cov.glyphs = sorted(glyphs, key=lambda g: order_index.get(g, 1 << 30))
-                mgs.Coverage.append(cov)
-            mgs.MarkSetCount = len(mgs.Coverage)
-            gdef.MarkGlyphSetsDef = mgs
+        order_index = {g: i for i, g in enumerate(merged.getGlyphOrder())}
+        gdef.MarkGlyphSetsDef = self.mark_union.build(order_index)
         gdef.VarStore = self.var_store.build()
         wrapper.table = gdef
         merged["GDEF"] = wrapper
@@ -413,36 +467,53 @@ class SameSourceSubsetMerger:
     # ------------------------------------------------------------------
     # VVAR
     # ------------------------------------------------------------------
-    def _merge_vvar_maps(self, merged, base, ren, vvar_offset, added_names):
-        """把本分片的 VVAR DeltaSetIndexMap 重定位后并入"""
-        src = base["VVAR"].table
-        dst = merged["VVAR"].table
-        for attr in _VVAR_MAPS:
-            smap = getattr(src, attr, None)
-            dmap = getattr(dst, attr, None)
-            if smap is None or dmap is None or not getattr(smap, "mapping", None):
-                continue
-            for old, val in smap.mapping.items():
-                new = ren.get(old, old)
-                if new not in added_names:
-                    continue
-                if val != NO_VARIATION_INDEX and vvar_offset:
-                    val = (((val >> 16) + vvar_offset) << 16) | (val & 0xFFFF)
-                dmap.mapping[new] = val
+    def _merge_variation_maps(self, merged, base, ren, vvar_offset, hvar_offset,
+                              added_names):
+        """把本分片 HVAR/VVAR 的 DeltaSetIndexMap 重定位后并入。
 
-    def _finalize_vvar(self, merged):
-        if "VVAR" not in merged:
-            return
-        vvar = merged["VVAR"].table
-        if self.vvar_store.var_data:
-            vvar.VarStore = self.vvar_store.build()
-        order = merged.getGlyphOrder()
-        for attr in _VVAR_MAPS:
-            m = getattr(vvar, attr, None)
-            if m is None:
+        DeltaSetIndexMap 的值是 (outer<<16)|inner: outer 是 VarData 序号,
+        inner 是该 VarData 内的 region 序号。VarData 拼接后 outer 要加上
+        本分片的基址偏移 (region 序号不变)。
+        """
+        for tag, attrs, offset in (("VVAR", _VVAR_MAPS, vvar_offset),
+                                   ("HVAR", _HVAR_MAPS, hvar_offset)):
+            if tag not in base or tag not in merged:
                 continue
-            for gn in order:
-                m.mapping.setdefault(gn, NO_VARIATION_INDEX)
+            src = base[tag].table
+            dst = merged[tag].table
+            for attr in attrs:
+                smap = getattr(src, attr, None)
+                dmap = getattr(dst, attr, None)
+                if smap is None or dmap is None or not getattr(smap, "mapping", None):
+                    continue
+                for old, val in smap.mapping.items():
+                    new = ren.get(old, old)
+                    if new not in added_names:
+                        continue
+                    if val != NO_VARIATION_INDEX and offset:
+                        val = (((val >> 16) + offset) << 16) | (val & 0xFFFF)
+                    dmap.mapping[new] = val
+
+    def _finalize_variation_maps(self, merged):
+        """写回并集 VarStore, 并保证 DeltaSetIndexMap 覆盖全部字形。
+
+        fontTools 的 VarIdxMap.preWrite 会按字形序逐个取值, 缺项直接 KeyError;
+        没有增量的字形必须显式给 NO_VARIATION_INDEX。
+        """
+        order = merged.getGlyphOrder()
+        for tag, attrs, union in (("VVAR", _VVAR_MAPS, self.vvar_store),
+                                  ("HVAR", _HVAR_MAPS, self.hvar_store)):
+            if tag not in merged:
+                continue
+            table = merged[tag].table
+            if union.var_data:
+                table.VarStore = union.build()
+            for attr in attrs:
+                m = getattr(table, attr, None)
+                if m is None or not hasattr(m, "mapping"):
+                    continue
+                for gn in order:
+                    m.mapping.setdefault(gn, NO_VARIATION_INDEX)
 
     # ------------------------------------------------------------------
     # 度量重算
@@ -451,6 +522,8 @@ class SameSourceSubsetMerger:
     def _recalc_metrics(font):
         from fontTools.otlLib.maxContextCalc import maxCtxFont
 
+        if "glyf" not in font:
+            return _recalc_metrics_cff(font)
         glyf = font["glyf"]
         head = font["head"]
         hmtx = font["hmtx"]
@@ -545,6 +618,93 @@ class SameSourceSubsetMerger:
         return out
 
 
+def _recalc_metrics_cff(font):
+    """CFF/CFF2 字体的度量重算 (没有 glyf 表, 用 BoundsPen 取边界)"""
+    from fontTools.otlLib.maxContextCalc import maxCtxFont
+    from fontTools.pens.boundsPen import BoundsPen
+
+    order = font.getGlyphOrder()
+    glyph_set = font.getGlyphSet()
+    head = font["head"]
+    hmtx = font["hmtx"]
+
+    bounds = {}
+    xmin = ymin = 1 << 30
+    xmax = ymax = -(1 << 30)
+    for gn in order:
+        pen = BoundsPen(glyph_set)
+        try:
+            glyph_set[gn].draw(pen)
+        except Exception:
+            pen.bounds = None
+        b = pen.bounds
+        bounds[gn] = b
+        if b:
+            xmin = min(xmin, b[0])
+            ymin = min(ymin, b[1])
+            xmax = max(xmax, b[2])
+            ymax = max(ymax, b[3])
+    if xmin <= xmax:
+        head.xMin, head.yMin, head.xMax, head.yMax = xmin, ymin, xmax, ymax
+
+    advance_max = 0
+    min_lsb = 1 << 30
+    min_rsb = 1 << 30
+    x_max_extent = -(1 << 30)
+    for gn in order:
+        advance, lsb = hmtx[gn]
+        b = bounds[gn]
+        width = (b[2] - b[0]) if b else 0
+        advance_max = max(advance_max, advance)
+        min_lsb = min(min_lsb, lsb)
+        min_rsb = min(min_rsb, advance - lsb - width)
+        x_max_extent = max(x_max_extent, lsb + width)
+    hhea = font["hhea"]
+    hhea.advanceWidthMax = advance_max
+    hhea.minLeftSideBearing = min_lsb
+    hhea.minRightSideBearing = min_rsb
+    hhea.xMaxExtent = x_max_extent
+
+    if "vhea" in font and "vmtx" in font:
+        vhea = font["vhea"]
+        adv_height_max = 0
+        min_tsb = 1 << 30
+        min_bsb = 1 << 30
+        y_max_extent = -(1 << 30)
+        for gn in order:
+            adv, tsb = font["vmtx"][gn]
+            b = bounds[gn]
+            height = (b[3] - b[1]) if b else 0
+            adv_height_max = max(adv_height_max, adv)
+            min_tsb = min(min_tsb, tsb)
+            min_bsb = min(min_bsb, adv - tsb - height)
+            y_max_extent = max(y_max_extent, tsb + height)
+        vhea.advanceHeightMax = adv_height_max
+        vhea.minTopSideBearing = min_tsb
+        vhea.minBottomSideBearing = min_bsb
+        vhea.yMaxExtent = y_max_extent
+
+    if "OS/2" in font:
+        os2 = font["OS/2"]
+        os2.recalcAvgCharWidth(font)
+        os2.recalcUnicodeRanges(font)
+        codepoints = [cp for st in font["cmap"].tables
+                      if hasattr(st, "cmap") and st.cmap for cp in st.cmap]
+        if codepoints:
+            os2.usFirstCharIndex = min(min(codepoints), 0xFFFF)
+            os2.usLastCharIndex = min(max(codepoints), 0xFFFF)
+        try:
+            os2.usMaxContext = maxCtxFont(font)
+        except Exception:
+            pass
+        try:
+            os2.recalcCodePageRanges(font)
+        except Exception:
+            pass
+    # maxp.recalc() 是 glyf 专用 (会取 glyf 表); CFF/CFF2 只需字形数
+    font["maxp"].numGlyphs = len(order)
+
+
 def load_subsets(subsets):
     """把 str/Path/TTFont 混合列表统一为 (TTFont 列表, 标签列表)"""
     from .. import load_font
@@ -584,6 +744,9 @@ def merge_subsets(subsets, out_path=None, tag="s", output_flavor=None,
     merger.log(f"[并集] {len(fonts)} 个分片, 基底: {type_label(fonts[0])}, "
                f"{len(fonts[0].getGlyphOrder())} 字形")
     merged = merger.merge(fonts, labels=labels)
+
+    if merged.get("maxp") is not None:
+        merged["maxp"].numGlyphs = len(merged.getGlyphOrder())
 
     if complete_name_table:
         from ..tables.name_table import complete_vf_name_table

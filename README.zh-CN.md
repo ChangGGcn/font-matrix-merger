@@ -21,7 +21,7 @@
 - **可变字体**：可变主字体输出仍保持可变，主/打底 Axis 取**并集**（fvar/avar/STAT 同步，varStore Region 扩展）。
 - **OpenType 合并**：打底 GSUB/GPOS/GDEF 通过 `fontTools.subset` 闭包修剪到存活字形后追加，带 lookup 索引重映射与字形名深度重映射；冲突以主为准。
 - **纯 FontTools 管线**：字形注入走官方 TTX XML 往返（`saveXML` → 注入 → `ttx` 编译），绕开 `fontTools.merge` 对 CID-keyed CFF 抛出的 `NotImplementedError`。
-- **同源分片并集**：`merge_subsets()` 把同一可变字体按 `unicode-range` 切出的 webfont 分片**保特性**并回一个可变字体——字形、`gvar`、`hmtx`/`vmtx`、`cmap`、GSUB/GPOS lookup（同 tag **并集**）、GDEF `ItemVariationStore`、`HVAR`/`VVAR` 全部保留，字重插值与 `vert`/`vrt2`/`kern`/`mark` 不丢。
+- **同源分片并集**：`merge_subsets()` 把同一可变字体按 `unicode-range` 切出的 webfont 分片**保特性**并回一个可变字体——**glyf 与 CFF2** 轮廓、`gvar`/CFF2 blend（`vsindex` + FDSelect/FDArray）、`hmtx`/`vmtx`、`cmap`、GSUB/GPOS lookup（同 tag **并集**）、GDEF `ItemVariationStore`/`MarkGlyphSetsDef`、`HVAR`/`VVAR` 全部保留，字重插值与 `vert`/`vrt2`/`kern`/`mark` 不丢。
 - **合并自检**：`verify_merge()` 在多个轴位置实例化源分片与合并结果，逐字形比对轮廓/度量，并断言码位、特性、布局完整性与容器元数据。
 - **产物保存防护**：所有保存点走 `save_font()`——清 `flavor` + 校验 sfnt 魔数；woff2 载入的字体不会再被写成"名为 .ttf、实为 `wOF2`"的文件。
 
@@ -48,12 +48,12 @@ FontMerger/
 | **CID 合并** | 双 CID：CID 偏移 + CharString 物化直接复制；CID↔name-keyed 转换（含 cmap format 14 UVS） |
 | **可变字体** | 主 VF 输出保持可变（CFF2/HVAR/STAT/fvar 完整保留并补全） |
 | **Axis 并集** | 主/打底轴空间取并集；varStore（含 GDEF/HVAR/MVAR）恒定轴 Region 扩展 |
-| **OpenType 特性合并** | 打底 GSUB/GPOS/GDEF 用 Subsetter 闭包修剪；同 tag 冲突以主为准 |
+| **OpenType 特性合并** | 打底 GSUB/GPOS/GDEF 用 Subsetter 闭包修剪后追加；同 tag feature **并成一条记录**，打底 Script/LangSys 一并并入（追加的 feature 才可达），FeatureList 重排后重写 `FeatureVariations` 索引，GDEF 字类/VarStore/MarkGlyphSets 取并集并重映射 `LookupFlag` bit4 的 `MarkFilteringSet` |
 | **缩放 + 基线偏移** | Pen 管线重建轮廓（T2CharStringPen/TTGlyphPen + TransformPen），度量同步 |
 | **重叠合并** | 可变→静态实例化后 `removeOverlaps` 布尔合并 |
 | **子集化** | `create_glyph_subset` — 按字符集保留字形 |
 | **WOFF/WOFF2 解包** | webfont 可直接作为输入 |
-| **同源分片并集** | `merge_subsets()`：同一 VF 的 `unicode-range` 分片对象级并集（不走 TTX）；feature/Script/GDEF VarStore 并集、HVAR 重建、VVAR 重定位、cmap 统一、name 补全 |
+| **同源分片并集** | `merge_subsets()`：同一 VF 的 `unicode-range` 分片对象级并集（不走 TTX）；**glyf + CFF2**（CharStrings/FDSelect/FDArray 并集，CFF2 `blend`/`vsindex` 原样保留）、feature/Script/GDEF VarStore/MarkGlyphSets 并集、FeatureVariations 索引重写、HVAR 重建（glyf）或 HVAR VarStore 并集（CFF2）、VVAR 重定位、cmap 统一、name 补全 |
 | **合并自检** | `verify_merge()`：多轴位置逐字形轮廓/度量比对 + cmap/特性/布局完整性/容器断言 |
 | **保存防护** | `save_font()`：清 `flavor`、校验 sfnt 魔数；`head.flags` 清 WOFF2 残留位、补 nameID 16/17/25 与实例 PS 名 |
 | **glyf 快速注入** | `glyf`+`glyf` 合并改为对象级逐字形复制，不再整字体 TTX 往返（给 25k 字形主字体加 135 个字形：153s → 3.7s）；CFF/CFF2/CID 仍走 TTX 管线 |
@@ -234,12 +234,12 @@ merged = merge_subsets(paths, out_path="Merged.ttf", tag="ja", verify=True)
 
 1. **JP（CID CFF2）作主字体**（矩阵 C1/D1）：合并本身成功（约 18,600~18,868 字形），但保存阶段打底拉丁字形在 cmap format 4 的引用偶发不完整；矩阵生成器降级走静态实例化路径。如需真·可变输出，需攻克 CFF2 CID 注入的更深层命名空间问题
 2. **Master 级插值合成**（打底字形随打底轴变动）：尚未实现——打底字形按打底默认实例并入，在主 VF 各轴上恒定
-3. **OpenType 特性**：追加的打底 feature 所引用字形必须存在于主字体（否则跳过该 feature）；同 tag feature 并成一条记录（字形名冲突以主为准），打底的 Script/LangSys 一并并入（否则追加的 feature 不可达）；FeatureList 需要重排时，主字体的 `FeatureVariations` 会被丢弃。GDEF `GlyphClassDef`/`MarkAttachClassDef` 取并集、`ItemVariationStore` 做并集（打底 GPOS 的 `VariationIndex` 重定位）；`MarkGlyphSetsDef` 仍只用主字体的
+3. **OpenType 特性**：追加的打底 feature 所引用字形必须存在于主字体（否则跳过该 lookup）。同 tag feature 并成一条记录；打底 Script/LangSys 一并并入（否则追加的 feature 不可达）；FeatureList 重排后重写 `FeatureVariations` 的 FeatureIndex（表本身保留，无法映射的记录才会被丢）；GDEF `GlyphClassDef`/`MarkAttachClassDef`/`MarkGlyphSetsDef` 与 `ItemVariationStore` 均取并集，并重映射 `LookupFlag` bit4 的 `MarkFilteringSet`。异源路径不并入**打底字体自己的** `FeatureVariations`（只保留主字体的）
 4. **VORG**：默认轴位置实例化时数值正确；非默认位置需额外重算
 5. **多级 OT 特性**：上级已并入的 feature 会在下级被重复检测（幂等，但 lookup 可能冗余）
 6. **打包**：仓库根目录即包本身，`pip install` 尚未接线——目前 clone 即用；PyPI 化目录结构在规划中
 7. **本地授权字体**仅用于本地测试，刻意不包含在本仓库中（真实路径见未入库的 `tests/local_fonts.py`）；文档样例中出现的字体均为 OFL 开源授权。
-8. **`merge_subsets()` 仅支持 glyf 轮廓**：CFF2 分片并集尚未实现（CFF2 的 CharStrings/blend 命名空间需要独立的并集逻辑）。
+8. **`merge_subsets()` 的 CFF2 边界**：glyf 与 CFF2 分片都支持，但 CFF2 要求各分片共享同一 **VarStore / GlobalSubrs** 结构（pyftsubset 会原样保留）；FDArray 的差异由 FD 级并集处理。若某个工具逐分片重建/重编号了 CFF2 VarStore，则 `blend`/`vsindex` 需要重写——该路径会明确报错而不是产出坏字体。CFF 与 CFF2 混合分片不支持。
 9. **自动名字形一律加别名**：post 3.0 的序号名（`glyphNNNNN`）在分片间同名但不同源，故一律改名保留——同一无码位字形被多个分片保留时会多出一份内容相同的副本，用少量体积换取"绝不混淆两个不同字形"。
 
 ## 协议

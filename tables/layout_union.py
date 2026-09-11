@@ -296,6 +296,91 @@ def _freeze(value, depth=0):
     return repr(value)
 
 
+class MarkGlyphSetUnion:
+    """GDEF MarkGlyphSetsDef 并集 + 索引重映射。
+
+    参考 fontTools.merge.layout 的 MarkGlyphSetsDef.mergeMap (Coverage 拼接)
+    与 Lookup.mapMarkFilteringSets (LookupFlag bit4 索引重映射)：
+    LookupFlag bit4 (0x0010) 表示 Lookup.MarkFilteringSet 指向 GDEF
+    MarkGlyphSetsDef.Coverage 的**下标**, 所以并集后必须重映射,
+    否则被并进来的打底 lookup 会指向别的字体的 mark 集合。
+    相同内容的集合去重 (同源分片里极常见), 避免 123 份副本。
+    """
+
+    def __init__(self):
+        self.coverages = []
+        self._index = {}
+
+    def add(self, mark_glyph_sets, remap_name=None, alive=None, order_index=None):
+        """并入一份 MarkGlyphSetsDef; 返回 局部索引 → 并集索引 的列表"""
+        remap = []
+        if mark_glyph_sets is None:
+            return remap
+        for cov in mark_glyph_sets.Coverage:
+            glyphs = [remap_name.get(g, g) if remap_name else g for g in cov.glyphs]
+            if alive is not None:
+                glyphs = [g for g in glyphs if g in alive]
+            if order_index is not None:
+                glyphs = sorted(glyphs, key=lambda g: order_index.get(g, 1 << 30))
+            else:
+                glyphs = sorted(glyphs)
+            key = tuple(glyphs)
+            idx = self._index.get(key)
+            if idx is None:
+                idx = len(self.coverages)
+                self._index[key] = idx
+                self.coverages.append(list(glyphs))
+            remap.append(idx)
+        return remap
+
+    def build(self, order_index=None):
+        """构造 MarkGlyphSetsDef; 空集返回 None"""
+        if not self.coverages:
+            return None
+        mgs = ot.MarkGlyphSetsDef()
+        mgs.MarkSetTableFormat = 1
+        mgs.Coverage = []
+        for glyphs in self.coverages:
+            cov = ot.Coverage()
+            if order_index is not None:
+                cov.glyphs = sorted(glyphs, key=lambda g: order_index.get(g, 1 << 30))
+            else:
+                cov.glyphs = list(glyphs)
+            mgs.Coverage.append(cov)
+        mgs.MarkSetCount = len(mgs.Coverage)
+        return mgs
+
+    def __bool__(self):
+        return bool(self.coverages)
+
+
+def remap_feature_variations(fv, index_map):
+    """按 index_map 重写 FeatureVariations 里全部 FeatureIndex。
+
+    FeatureVariations 的 FeatureTableSubstitution.SubstitutionRecord 用
+    FeatureIndex 指向 FeatureList; FeatureList 一旦重排 (合并/排序) 就必须
+    同步重写, 否则替换规则会挂到别的 feature 上 —— 这正是"重排就丢弃
+    FeatureVariations"的根因, 修好后无需丢弃。
+
+    Returns:
+        (是否仍有未映射项) —— 有则说明该 Variant 已失效, 调用方应整体丢弃
+    """
+    if fv is None:
+        return False
+    dangling = False
+    for rec in fv.FeatureVariationRecord:
+        fts = rec.FeatureTableSubstitution
+        if fts is None:
+            continue
+        for sub in fts.SubstitutionRecord:
+            new = index_map.get(sub.FeatureIndex)
+            if new is None:
+                dangling = True
+            else:
+                sub.FeatureIndex = new
+    return dangling
+
+
 class LayoutUnion:
     """把多个字体的 GSUB 或 GPOS 并成一张表"""
 
@@ -306,6 +391,8 @@ class LayoutUnion:
         self.feature_records = []
         self.lookups = []
         self.script_records = []
+        self.fv_records = {}
+        self.fv_order = []
 
     # -- 并入一份表 --------------------------------------------------------
     def add_from(self, base_table, ren, var_offset=0, mark_set_remap=()):
@@ -336,11 +423,21 @@ class LayoutUnion:
         n_base = len(base_table.LookupList.Lookup)
         self.lookups.extend(base_lookups)
 
+        # FeatureVariations 引用的 feature (典型如 rvrn) 常常**本身没有 lookup**
+        # (替换表由条件提供); 这类 feature 记录必须保留, 否则 FV 无处可指。
+        fv_feature_indices = set()
+        fv = getattr(base_table, "FeatureVariations", None)
+        if fv is not None:
+            for rec in fv.FeatureVariationRecord:
+                fts = rec.FeatureTableSubstitution
+                for sub in (fts.SubstitutionRecord if fts else []):
+                    fv_feature_indices.add(sub.FeatureIndex)
+
         index_map = {}
         for i, fr in enumerate(base_table.FeatureList.FeatureRecord):
             idxs = [lookup_base + j for j in fr.Feature.LookupListIndex
                     if j < n_base]
-            if not idxs:
+            if not idxs and i not in fv_feature_indices:
                 continue
             new_fr = copy.deepcopy(fr)
             new_fr.Feature.LookupListIndex = idxs
@@ -348,6 +445,56 @@ class LayoutUnion:
             self.feature_records.append(new_fr)
         if base_table.ScriptList is not None:
             self._merge_scripts(base_table.ScriptList, index_map)
+        self._add_feature_variations(base_table, ren, lookup_base, n_base,
+                                     index_map, var_offset)
+
+    def _add_feature_variations(self, base_table, ren, lookup_base, n_base,
+                                base_index_map, var_offset):
+        """并入 FeatureVariations: 条件集相同的记录合并, 替换 lookup 取并集。
+
+        同源分片常各自带一份**条件集完全相同**的 FeatureVariations, 其替换
+        lookup 只覆盖自己的字形 —— 按条件集签名归并后把这些 lookup 并到
+        同一条 SubstitutionRecord 里, 语义正是"该条件下这批字形用替换形"。
+        """
+        fv = getattr(base_table, "FeatureVariations", None)
+        if fv is None:
+            return
+        for rec in fv.FeatureVariationRecord:
+            fts = rec.FeatureTableSubstitution
+            if fts is None or not fts.SubstitutionRecord:
+                continue
+            key = _freeze(rec.ConditionSet)
+            merged = self.fv_records.get(key)
+            if merged is None:
+                merged = copy.deepcopy(rec)
+                merged.FeatureTableSubstitution.SubstitutionRecord = []
+                self.fv_records[key] = merged
+                self.fv_order.append(key)
+            subs = merged.FeatureTableSubstitution.SubstitutionRecord
+            by_index = {s.FeatureIndex: s for s in subs}
+            for sub in fts.SubstitutionRecord:
+                new_fi = base_index_map.get(sub.FeatureIndex)
+                if new_fi is None:
+                    continue
+                new_feat = copy.deepcopy(sub.Feature)
+                remap_glyph_names(new_feat, ren)
+                idxs = [lookup_base + j for j in new_feat.LookupListIndex
+                        if j < n_base]
+                if not idxs:
+                    continue
+                new_feat.LookupListIndex = idxs
+                offset_var_devices(new_feat, var_offset)
+                target = by_index.get(new_fi)
+                if target is None:
+                    ns = copy.deepcopy(sub)
+                    ns.FeatureIndex = new_fi
+                    ns.Feature = new_feat
+                    subs.append(ns)
+                    by_index[new_fi] = ns
+                else:
+                    for i in idxs:
+                        if i not in target.Feature.LookupListIndex:
+                            target.Feature.LookupListIndex.append(i)
 
     # -- ScriptList --------------------------------------------------------
     def _merge_scripts(self, base_script_list, base_index_map):
@@ -444,5 +591,46 @@ class LayoutUnion:
         lookup_list = ot.LookupList()
         lookup_list.Lookup = self.lookups
         table.LookupList = lookup_list
-        table.FeatureVariations = None
+
+        # FeatureVariations: FeatureIndex 要走同一套 group→final 映射
+        table.FeatureVariations = self._finalize_feature_variations(
+            old_to_group, final_map)
+        if table.FeatureVariations is not None:
+            table.Version = 0x00010001
         return table
+
+    def _finalize_feature_variations(self, old_to_group, final_map):
+        if not self.fv_order:
+            return None
+        fv = ot.FeatureVariations()
+        fv.Version = 0x00010000
+        fv.FeatureVariationRecord = []
+        for key in self.fv_order:
+            rec = self.fv_records[key]
+            fts = rec.FeatureTableSubstitution
+            by_final = {}
+            order = []
+            for sub in fts.SubstitutionRecord:
+                old = sub.FeatureIndex
+                if old not in old_to_group:
+                    continue
+                new = final_map[old_to_group[old]]
+                target = by_final.get(new)
+                if target is None:
+                    ns = copy.deepcopy(sub)
+                    ns.FeatureIndex = new
+                    by_final[new] = ns
+                    order.append(ns)
+                else:
+                    for i in sub.Feature.LookupListIndex:
+                        if i not in target.Feature.LookupListIndex:
+                            target.Feature.LookupListIndex.append(i)
+            if not order:
+                continue
+            fts.SubstitutionRecord = order
+            fts.SubstitutionCount = len(order)
+            fv.FeatureVariationRecord.append(rec)
+        if not fv.FeatureVariationRecord:
+            return None
+        fv.FeatureVariationRecordCount = len(fv.FeatureVariationRecord)
+        return fv

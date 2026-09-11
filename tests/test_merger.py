@@ -12,7 +12,7 @@ sys.path.insert(0, _repo_dir)   # 使 tests.local_fonts 在"直接运行脚本"�
 
 from FontMerger import *
 from fontTools.ttLib import TTFont
-from tests.subset_fixture import cached_subsets
+from tests.subset_fixture import cached_subsets, cached_rich_subsets
 
 # 公开可下载的 OFL 测试字体（目录位于仓库外，本地需自备；缺失时用例自动 SKIP）
 _OPEN_FONTS = {
@@ -399,6 +399,46 @@ def test_variable_to_static_cff2():
           % len(static.getGlyphOrder()))
 
 
+def test_generic_merge_preserves_mark_sets_and_fv():
+    """回归: 主字体的 MarkGlyphSetsDef (LookupFlag bit4 索引) 与
+    GSUB FeatureVariations 在追加打底 feature 后不能被丢弃或错位。"""
+    vf = _open_vf()
+    ip = _open("ttf_inter")
+    if not vf or not ip:
+        print("  test_generic_merge_preserves_mark_sets_and_fv: SKIP (测试字体未就位)")
+        return
+
+    from FontMerger.core.verify import _check_layout_integrity
+
+    rich, _ = cached_rich_subsets(vf, n=2)
+    if not rich:
+        print("  test_generic_merge_preserves_mark_sets_and_fv: SKIP (无法构造夹具)")
+        return
+
+    main = TTFont(rich)
+    assert getattr(main["GSUB"].table, "FeatureVariations", None) is not None,         "夹具缺少 FeatureVariations"
+
+    merger = FontMerger()
+    merger.mem = {"vTTF_sTTF": "可变"}
+    result = merger.merge_two(main, TTFont(ip))
+
+    fv = getattr(result["GSUB"].table, "FeatureVariations", None)
+    assert fv is not None, "通用路径丢弃了主字体的 FeatureVariations"
+    report = _check_layout_integrity(result)
+    assert not report["bad_mark_filters"],         "MarkFilteringSet 越界: %s" % report["bad_mark_filters"][:3]
+    assert not report["bad_feature_variations"],         "FeatureVariations 索引无效: %s" % report["bad_feature_variations"][:3]
+
+    buf = BytesIO()
+    result.save(buf)
+    again = TTFont(BytesIO(buf.getvalue()))
+    rep2 = _check_layout_integrity(again)
+    assert not rep2["bad_mark_filters"], rep2["bad_mark_filters"][:3]
+    assert not rep2["bad_feature_variations"], rep2["bad_feature_variations"][:3]
+    assert getattr(again["GSUB"].table, "FeatureVariations", None) is not None
+    print("  test_generic_merge_preserves_mark_sets_and_fv: %d 字形, PASSED"
+          % len(again.getGlyphOrder()))
+
+
 def main():
     print("FontMerger Test Suite")
     print("=" * 50)
@@ -410,6 +450,7 @@ def main():
         test_save_guard, test_conflict_auto_names, test_rename_glyphs,
         test_variable_to_static_fidelity, test_generic_feature_union,
         test_no_dangling_layout_refs, test_variable_to_static_cff2,
+        test_generic_merge_preserves_mark_sets_and_fv,
     ]
 
     passed = 0

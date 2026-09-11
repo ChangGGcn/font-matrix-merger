@@ -36,9 +36,10 @@ from .format.vf_axes import union_axes, axis_union_merge
 from .format.webfont import unwrap_webfont
 from .tables.base import merge_all_tables
 from .tables.ot_merge import merge_ot_features, prune_base_layout
-from .tables.layout_union import (LayoutUnion, layout_glyph_names,
-                                   offset_var_devices, remap_glyph_names,
-                                   resort_layout)
+from .tables.layout_union import (LayoutUnion, MarkGlyphSetUnion,
+                                   layout_glyph_names, offset_var_devices,
+                                   remap_feature_variations,
+                                   remap_glyph_names, resort_layout)
 from .tables.varstore import VarStoreUnion
 from .tables.name_table import complete_vf_name_table
 from .tables.head import fix_head_flags

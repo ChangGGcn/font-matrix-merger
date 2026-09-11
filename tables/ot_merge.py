@@ -27,8 +27,9 @@ import copy
 from fontTools.ttLib import TTFont
 from fontTools.subset import Subsetter, Options
 
-from .layout_union import (_freeze, find_or_create_lang, lang_systems,
-                           lang_systems_with_tag, offset_var_devices,
+from .layout_union import (MarkGlyphSetUnion, _freeze, find_or_create_lang,
+                           lang_systems, lang_systems_with_tag,
+                           offset_var_devices, remap_feature_variations,
                            remap_glyph_names, resort_layout)
 from .varstore import VarStoreUnion
 
@@ -124,15 +125,24 @@ def merge_base_layout(main_font, base_pruned, kept_glyphs):
     # GDEF VarStore 并集: 主的 VarData 保持在前 (基址 0), 打底的接在后面。
     # 打底 GPOS 里所有 VariationIndex 的 outer 索引要加上打底的基址偏移。
     var_union = VarStoreUnion()
+    mark_union = MarkGlyphSetUnion()
     var_offset = 0
+    mark_remap = ()
 
     # 合并 GDEF (GlyphClassDef/MarkAttach 等): 主优先
     if "GDEF" in base_layout:
         if "GDEF" in main_layout:
+            alive = set(main_font.getGlyphOrder())
+            order_index = {g: i for i, g in enumerate(main_font.getGlyphOrder())}
             var_union.add(getattr(main_layout["GDEF"].table, "VarStore", None))
-            var_offset = _merge_gdef(main_font, main_layout["GDEF"],
-                                     base_layout["GDEF"], kept, var_union)
-            _apply_varstore(main_font, main_layout["GDEF"], var_union)
+            # 主的 mark 集合先入并集 → 索引恒等映射, 主自己的 lookup 不受影响
+            mark_union.add(getattr(main_layout["GDEF"].table, "MarkGlyphSetsDef", None),
+                           alive=alive, order_index=order_index)
+            var_offset, mark_remap = _merge_gdef(main_font, main_layout["GDEF"],
+                                                 base_layout["GDEF"], kept,
+                                                 var_union, mark_union)
+            _apply_gdef_extras(main_font, main_layout["GDEF"], var_union,
+                               mark_union, order_index)
         else:
             # 主无 GDEF: 采用打底 GDEF, 但只保留名称与主字体一致的字形
             # (避免打底 name 空间如 uni0041 与主 A 错位)
@@ -152,21 +162,26 @@ def merge_base_layout(main_font, base_pruned, kept_glyphs):
 
         main_tbl = main_layout[tag].table
         base_tbl = base_layout[tag].table
-        _merge_gsub_gpos(main_font, tag, main_tbl, base_tbl, var_offset)
+        _merge_gsub_gpos(main_font, tag, main_tbl, base_tbl, var_offset,
+                         mark_remap)
 
     return main_font
 
 
-def _apply_varstore(font, main_gdef, var_union):
-    """把并集 ItemVariationStore 写回主的 GDEF, 并把 Version 提升到 1.3"""
-    if not var_union:
-        return
+def _apply_gdef_extras(font, main_gdef, var_union, mark_union, order_index):
+    """把并集 ItemVariationStore / MarkGlyphSetsDef 写回主的 GDEF 并升 Version。
+
+    GDEF Version 门槛: MarkGlyphSetsDef 需要 ≥ 1.2, VarStore 需要 1.3。
+    """
     table = main_gdef.table
-    table.VarStore = var_union.build()
-    version = 0x00010003
-    if table.Version and table.Version >= 0x00010002:
-        version = max(version, table.Version)
-    table.Version = version
+    if var_union:
+        table.VarStore = var_union.build()
+    if mark_union:
+        table.MarkGlyphSetsDef = mark_union.build(order_index)
+    if var_union:
+        table.Version = max(0x00010003, table.Version or 0)
+    elif mark_union and (table.Version or 0) < 0x00010002:
+        table.Version = 0x00010002
 
 
 def _use_base_gdef(font, base_gdef):
@@ -191,7 +206,8 @@ def _use_base_gdef(font, base_gdef):
     print(f"  [OT合并] GDEF: 来自打底 (主无, 过滤后 {n_cls} 个字类)")
 
 
-def _merge_gdef(font, main_gdef, base_gdef, kept, var_union=None):
+def _merge_gdef(font, main_gdef, base_gdef, kept, var_union=None,
+                mark_union=None):
     """GDEF 合并: 类定义取并集 (冲突以主为准), VarStore 做并集。
 
     GlyphClassDef / MarkAttachClassDef 是"字形 → 类"的映射, 主字体的值优先,
@@ -225,21 +241,25 @@ def _merge_gdef(font, main_gdef, base_gdef, kept, var_union=None):
             if g in alive and g not in mt.MarkAttachClassDef.classDefs:
                 mt.MarkAttachClassDef.classDefs[g] = v
 
-    # MarkGlyphSets: 主无则用打底 (索引被 LookupFlag bit4 引用, 不跨字体并集)
-    if (getattr(mt, "MarkGlyphSetsDef", None) is None
-            and getattr(bt, "MarkGlyphSetsDef", None) is not None):
-        mt.MarkGlyphSetsDef = copy.deepcopy(bt.MarkGlyphSetsDef)
+    # MarkGlyphSetsDef 并集: 返回打底局部索引 → 并集索引 的映射,
+    # 打底 lookup 的 LookupFlag bit4 索引要据此重写
+    mark_remap = ()
+    if mark_union is not None:
+        mark_remap = mark_union.add(
+            getattr(bt, "MarkGlyphSetsDef", None), alive=alive,
+            order_index={g: i for i, g in enumerate(font.getGlyphOrder())})
 
     n_cls = len(mt.GlyphClassDef.classDefs) if mt.GlyphClassDef is not None else 0
-    print(f"  [OT合并] GDEF: 字类 {n_cls} (打底补 {added_cls})")
+    print(f"  [OT合并] GDEF: 字类 {n_cls} (打底补 {added_cls}), "
+          f"mark 集合 {len(mark_union.coverages) if mark_union else 0}")
 
     # VarStore 并集: 打底的 GPOS VariationIndex 要按基址偏移重定位
-    if var_union is not None:
-        return var_union.add(getattr(bt, "VarStore", None))
-    return 0
+    var_offset = var_union.add(getattr(bt, "VarStore", None)) if var_union is not None else 0
+    return var_offset, mark_remap
 
 
-def _merge_gsub_gpos(font, tag, main_tbl, base_tbl, var_offset=0):
+def _merge_gsub_gpos(font, tag, main_tbl, base_tbl, var_offset=0,
+                     mark_set_remap=()):
     """GSUB/GPOS 表级合并: 主字体全部保留, 打底 lookup **并集**追加。
 
     与"同 tag 就整条跳过"的旧逻辑不同: 同一个 tag 的 lookup 做并集,
@@ -285,6 +305,14 @@ def _merge_gsub_gpos(font, tag, main_tbl, base_tbl, var_offset=0):
             return None
         # GPOS VariationIndex 重定位到并集 VarStore
         offset_var_devices(new_lookup, var_offset)
+        # LookupFlag bit4: MarkFilteringSet 是 GDEF MarkGlyphSetsDef 的下标,
+        # 并集后必须重映射 (同 fontTools merge.layout 的 mapMarkFilteringSets)
+        if (mark_set_remap
+                and getattr(new_lookup, "MarkFilteringSet", None) is not None
+                and getattr(new_lookup, "LookupFlag", 0) & 0x0010):
+            idx = new_lookup.MarkFilteringSet
+            new_lookup.MarkFilteringSet = (mark_set_remap[idx]
+                                           if idx < len(mark_set_remap) else 0)
         main_lookups.append(new_lookup)
         lookup_cache[li] = len(main_lookups) - 1
         return lookup_cache[li]
@@ -323,13 +351,20 @@ def _merge_gsub_gpos(font, tag, main_tbl, base_tbl, var_offset=0):
     records = list(main_tbl.FeatureList.FeatureRecord) + new_records
     if base_tbl.ScriptList is not None:
         _merge_script_list(main_tbl, base_tbl.ScriptList, feature_of_base, records)
-    _sort_feature_list(main_tbl, records)
+    feature_remap = _sort_feature_list(main_tbl, records)
 
-    # 主表可能根本没有 FeatureVariations 属性 (Version 1.0)
-    if getattr(main_tbl, "FeatureVariations", None) is not None:
-        print(f"  [OT合并] {tag}: 丢弃主的 FeatureVariations "
-              f"(feature 索引已重排, 无法安全保留)")
-        main_tbl.FeatureVariations = None
+    # FeatureVariations: FeatureList 重排后按同一排列重写 FeatureIndex。
+    # 参考 otTables.FeatureVariations 结构: 替换表的 lookup 索引仍指向主的
+    # 原 lookup (索引 0..n-1 未变), 因此只需重写 feature 索引即可完整保留。
+    fv = getattr(main_tbl, "FeatureVariations", None)
+    if fv is not None:
+        if remap_feature_variations(fv, feature_remap):
+            print(f"  [OT合并] {tag}: 丢弃主的 FeatureVariations "
+                  f"(存在无法映射的 feature 索引)")
+            main_tbl.FeatureVariations = None
+        else:
+            print(f"  [OT合并] {tag}: 保留主的 FeatureVariations (索引已重写)")
+
     # 追加 + 改名后修复 OpenType 排序不变量 (Coverage 与并行数组必须同序)
     resort_layout(font)
     print(f"  [OT合并] {tag}: 并入 {unioned} 条同 tag feature, "
@@ -378,12 +413,16 @@ def _merge_script_list(main_tbl, base_script_list, feature_of_base, records):
 
 
 def _sort_feature_list(main_tbl, records):
-    """FeatureList 按 tag 字母序排序 (规范要求), 并重写全部 feature 索引"""
+    """FeatureList 按 tag 字母序排序 (规范要求), 重写全部 feature 索引。
+
+    Returns:
+        {旧索引: 新索引} —— 供 FeatureVariations 等外部引用重写
+    """
     order = sorted(range(len(records)), key=lambda i: (records[i].FeatureTag, i))
     remap = {old: new for new, old in enumerate(order)}
     main_tbl.FeatureList.FeatureRecord = [records[i] for i in order]
     if main_tbl.ScriptList is None:
-        return
+        return remap
     for sr in main_tbl.ScriptList.ScriptRecord:
         if sr.Script.LangSysRecord:
             sr.Script.LangSysRecord.sort(key=lambda lr: lr.LangSysTag)
@@ -396,6 +435,7 @@ def _sort_feature_list(main_tbl, records):
             if req not in (0xFFFF, None):
                 lang.ReqFeatureIndex = remap.get(req, 0xFFFF)
     main_tbl.ScriptList.ScriptRecord.sort(key=lambda sr: sr.ScriptTag)
+    return remap
 
 
 def _remap_lookup_glyph_names(font, lookup):
