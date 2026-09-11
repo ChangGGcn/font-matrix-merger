@@ -16,7 +16,7 @@
 from fontTools.pens.recordingPen import RecordingPen
 from fontTools.varLib.instancer import instantiateVariableFont
 
-from ..tables.layout_union import _COVERAGE_ATTRS
+from ..tables.layout_union import _COVERAGE_ATTRS  # noqa: F401
 from ..utils.detect import is_variable
 
 #: 合并后不应存在的 WOFF2 残留位
@@ -49,10 +49,34 @@ def _coords_delta(a, b, tolerance):
 
 
 def _instance(font, position):
+    """在指定用户坐标实例化; 位置按字体自身的轴**投影** (缺轴忽略)。
+
+    跨设计空间合成时, 合并空间的坐标可能含源字体没有的轴 —— 对源字体而言
+    那些轴不存在, 直接忽略即可 (等价于"源在该轴上恒定")。
+    """
     if position is None or not is_variable(font):
         return font
-    return instantiateVariableFont(font, dict(position), inplace=False,
-                                   optimize=False)
+    own = {a.axisTag for a in font["fvar"].axes}
+    pos = {k: v for k, v in dict(position).items() if k in own}
+    if not pos:
+        return font
+    return instantiateVariableFont(font, pos, inplace=False, optimize=False)
+
+
+def grid_positions(font, per_axis=3, max_positions=64):
+    """在设计空间上取网格采样点 (每轴 min/default/max 的笛卡尔积, 截断)。"""
+    import itertools
+
+    if not is_variable(font):
+        return [None]
+    axes = font["fvar"].axes
+    values = [sorted({a.minValue, a.defaultValue, a.maxValue}) for a in axes]
+    out = []
+    for combo in itertools.product(*values):
+        out.append({a.axisTag: v for a, v in zip(axes, combo)})
+        if len(out) >= max_positions:
+            break
+    return out
 
 
 def _auto_positions(font):
@@ -82,7 +106,8 @@ def verify_merge(sources, merged, glyph_map=None, axis_positions="auto",
         merged: 合并结果 TTFont
         glyph_map: {分片标签: {源字形名: 合并后字形名/GID}};
                    缺省按字形名相同处理 (合并时未改名的情况)
-        axis_positions: "auto" | [None|dict]; None = 轴默认位置不实例化
+        axis_positions: "auto" (默认位置 + 首轴两端) | "grid" (各轴
+                        min/default/max 的网格) | [None|dict]; None = 不实例化
         tolerance: 轮廓坐标容差 (单位: 字体单位)
         sample: 每个分片最多比对多少个字形 (None = 全部)
         verbose: 打印进度
@@ -131,7 +156,12 @@ def verify_merge(sources, merged, glyph_map=None, axis_positions="auto",
         if merged_axes not in src_axes:
             failures.append("合并字体轴空间与源分片不一致: %s" % (merged_axes,))
 
-    positions = _auto_positions(merged) if axis_positions == "auto" else list(axis_positions)
+    if axis_positions == "auto":
+        positions = _auto_positions(merged)
+    elif axis_positions == "grid":
+        positions = grid_positions(merged)
+    else:
+        positions = list(axis_positions)
     checks["positions"] = [_label(p, merged) for p in positions]
 
     # ---- 3. 逐字形轮廓/度量比对 ----

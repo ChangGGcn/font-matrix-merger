@@ -34,6 +34,9 @@ from .format.static_extract import variable_to_static
 from .format.transform import apply_scale_offset, scale_font
 from .format.vf_axes import union_axes, axis_union_merge
 from .format.webfont import unwrap_webfont
+from .format.axis_mapping import (AxisMapping, PiecewiseLinear, axis_mappings,
+                                  evaluate_supports, refine_support_rebased,
+                                  source_location, fvar_triples, avar_segments)
 from .tables.base import merge_all_tables
 from .tables.ot_merge import merge_ot_features, prune_base_layout
 from .tables.layout_union import (LayoutUnion, MarkGlyphSetUnion,
