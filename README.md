@@ -16,6 +16,9 @@ The library is built on top of [**FontTools**](https://github.com/fonttools/font
 Key highlights:
 
 - **16-way merge matrix**: `merge_two()` auto-dispatches to the right strategy for any main/base combination.
+- **Same-source subset union**: `merge_subsets()` rebuilds **one variable font** from the per-`unicode-range` webfont subsets of a single VF — glyphs, `gvar`, `hmtx`/`vmtx`, `cmap`, GSUB/GPOS lookups (per-tag **feature union**), the GDEF `ItemVariationStore` and `HVAR`/`VVAR` are all carried over, so weight interpolation and `vert`/`vrt2`/`kern`/`mark` survive.
+- **Merge self-check**: `verify_merge()` instances sources and result at several axis positions and compares outline/metrics glyph by glyph, then asserts codepoints, features, layout integrity and container metadata.
+- **Save guard**: every save point goes through `save_font()`, which clears `flavor` and asserts the sfnt magic — a woff2-loaded font can no longer be written as an `x.ttf` file with `wOF2` magic.
 - **Multi-level chaining**: a main font plus 1..n base fonts, merged level by level; format/export questions are asked only once (answer memorization).
 - **CID-aware**: dual-CID fonts are merged via CID offset + materialized CharString copy; CID↔name-keyed normalization is handled automatically.
 - **Variable fonts**: a variable main font stays variable in the output, with axis **union** across main and base fonts (fvar/avar/STAT synchronized, varStore regions extended).
@@ -50,6 +53,10 @@ FontMerger/
 | **Overlap removal** | `removeOverlaps` boolean union after variable→static instancing |
 | **Subsetting** | `create_glyph_subset` — keep only glyphs for a given character set |
 | **WOFF/WOFF2 unwrap** | Web fonts accepted as input directly |
+| **Same-source subset union** | `merge_subsets()`: object-level union of `unicode-range` subsets of one VF (no TTX roundtrip); feature/script/GDEF-VarStore union, HVAR rebuild, VVAR rebase, cmap harmonization, name completion |
+| **Merge verification** | `verify_merge()`: per-glyph outline/metric diff at N axis positions, plus cmap / feature / layout-integrity / container assertions |
+| **Save guard** | `save_font()`: clear `flavor`, assert sfnt magic; `head.flags` WOFF2 bit removal, nameID 16/17/25 + instance PS names |
+| **Fast glyf injection** | `glyf` + `glyf` merges copy glyphs object by object instead of round-tripping the whole font through TTX (adding 135 glyphs to a 25k-glyph font: 153 s → 3.7 s); CFF/CFF2/CID keep the TTX pipeline |
 | **Naming** | Output family `<main font> mod`, copyrights merged with `^n^n` separators |
 
 ### Merge matrix (5×5)
@@ -184,21 +191,58 @@ r.save("merged.otf")
 # Or the one-line convenience helper
 from FontMerger import merge_fonts
 result = merge_fonts("main.otf", ["base1.otf", "base2.ttf"])
+
+# Pre-answer the interactive questions explicitly (non-interactive use)
+result = merge_fonts("main.otf", ["base.otf"], answers={"vOTF_sOTF": "静态"})
+```
+
+### Merging same-source webfont subsets (`merge_subsets`)
+
+When a variable font is shipped as N webfont subsets (one `@font-face` +
+`unicode-range` per slice), merging them back with the generic variable×variable
+path would instance every base slice to a static font (losing `gvar`/`HVAR`/`VVAR`
+and the `vert`/`vrt2`/`kern`/`mark` lookups of every slice but the first).
+`merge_subsets()` takes the union path instead: no instancing, no axis union,
+every slice keeps its own glyphs, deltas and lookups.
+
+```python
+from FontMerger import merge_subsets, verify_merge
+
+paths = sorted(glob("webfont/ja-v2/*.woff2"))      # subsets[0] is the base
+
+merged = merge_subsets(paths, out_path="OpenAISansJP-Merged.ttf", tag="ja",
+                       complete_name_table=True, fix_head_flags=True)
+
+# self-check: instance sources + result at the default/min/max axis positions
+report = verify_merge(paths, merged,
+                      glyph_map=merged.subset_merger.glyph_map())
+assert report["ok"], report["failures"]
+
+# source glyph name -> merged GID (post-reorder), per subset
+gmap = merged.subset_merger.glyph_map()
+```
+
+Or in one call, with the self-check built in:
+
+```python
+merged = merge_subsets(paths, out_path="Merged.ttf", tag="ja", verify=True)
 ```
 
 ### Tests
 
-`tests/generate_matrix.py` generates the full 16-combination matrix; `tests/test_merger.py` contains the unit tests. The test suite needs a local font collection (paths are resolved under `tests/../test/`) — the fonts themselves are **not redistributed** with the repository. [OFL Google Fonts](https://fonts.google.com/) typefaces used in the samples (Libre Caslon Text, LXGW WenKai TC, Source Serif/Source Han, Zed Text) can be downloaded freely; *commercially licensed* test fonts are mapped in the local, non-committed file `tests/local_fonts.py` (template: `tests/local_fonts.example.py`) and any missing font simply skips the corresponding case.
+`tests/generate_matrix.py` generates the full 16-combination matrix; `tests/test_merger.py` (unit tests) and `tests/test_subset_merge.py` (same-source subset union) contain the test cases. The subset cases build their own fixtures with `pyftsubset` (`tests/subset_fixture.py`), so no webfont slices need to be committed. The test suite needs a local font collection (paths are resolved under `tests/../test/`) — the fonts themselves are **not redistributed** with the repository. [OFL Google Fonts](https://fonts.google.com/) typefaces used in the samples (Libre Caslon Text, LXGW WenKai TC, Source Serif/Source Han, Zed Text) can be downloaded freely; *commercially licensed* test fonts are mapped in the local, non-committed file `tests/local_fonts.py` (template: `tests/local_fonts.example.py`) and any missing font simply skips the corresponding case.
 
 ## Known Limitations
 
 1. **JP (CID CFF2) as the main font** (matrix cells C1/D1): the merge itself succeeds (~18,600–18,868 glyphs), but the save stage can leave incomplete cmap format-4 references for base Latin glyphs; the matrix generator falls back to a static-instanced path. A true variable output requires solving deeper CFF2 CID namespace issues.
 2. **Master-level interpolation composition** (base glyphs varying along the base font’s axes) is not implemented: base glyphs are merged at the base’s default instance and are constant across the main VF’s axes.
-3. **OpenType features**: appended base features are merged only if all referenced glyphs exist in the main font (otherwise skipped); GDEF conflicts follow the main font.
+3. **OpenType features**: appended base features are merged only if all referenced glyphs exist in the main font (otherwise skipped); same-tag features are unioned into one record (main wins on glyph-name conflicts), base scripts/lang-systems are merged so the appended features stay reachable, and a main-font `FeatureVariations` table is dropped when the FeatureList has to be re-sorted. GDEF `GlyphClassDef`/`MarkAttachClassDef` take the union and the `ItemVariationStore` is unioned (base GPOS `VariationIndex` devices are re-based); `MarkGlyphSetsDef` is still taken from the main font only.
 4. **VORG**: values are correct when instancing at the default axis position; non-default positions need recomputation.
 5. **Multi-level OT features**: a feature already merged at an earlier level is re-detected at later levels (idempotent, but lookups may become redundant).
 6. **Packaging**: the repository root is the package itself, so `pip install` from a clone is not wired up yet — clone-and-run for now; a PyPI-ready layout is planned.
 7. **Locally licensed fonts** are used only for local testing and are intentionally excluded from this repository (paths live in the non-committed `tests/local_fonts.py`); all fonts named in the documentation samples are OFL-licensed.
+8. **`merge_subsets()` is glyf-only**: CFF2 subset unions are not implemented yet (the CFF2 CharStrings/blend namespace needs its own union path).
+9. **Auto-named glyph aliasing**: subset glyphs with post-3.0 sequence names (`glyphNNNNN`) are always aliased, so a slice that keeps the same no-codepoint glyph as another slice contributes an extra (content-identical) copy; this trades a little size for never conflating two different glyphs.
 
 ## License
 
