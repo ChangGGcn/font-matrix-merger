@@ -22,6 +22,7 @@ Key highlights:
 - **Multi-level chaining**: a main font plus 1..n base fonts, merged level by level; format/export questions are asked only once (answer memorization).
 - **CID-aware**: dual-CID fonts are merged via CID offset + materialized CharString copy; CID↔name-keyed normalization is handled automatically.
 - **Variable fonts**: a variable main font stays variable in the output, with axis **union** across main and base fonts (fvar/avar/STAT synchronized, varStore regions extended).
+- **Cross-design-space composition**: when the base font is variable, its per-glyph deltas are **re-parameterized into the merged normalized space** (`format/axis_mapping.py`), so the merged glyphs stay pointwise equal to the base instance at every location — including base-only axes, different axis ranges and different `avar` maps. When the base's default differs from the merged default the missing master is interpolated (phantom points included) and the tuples are re-based; a grid self-check (`verify_composition`) must pass or the merge falls back to the legacy "instance the base at its default" behaviour.
 - **OpenType merging**: base GSUB/GPOS/GDEF tables are pruned with `fontTools.subset` closure to the surviving glyphs, then appended with lookup-index remapping and deep glyph-name remapping; conflicts resolve in favor of the main font.
 - **Pure FontTools pipeline**: glyph injection goes through the official TTX XML roundtrip (`saveXML` → inject → `ttx` compile) instead of `fontTools.merge`, which raises `NotImplementedError` on CID-keyed CFF.
 
@@ -47,6 +48,7 @@ FontMerger/
 | **Format conversion** | CFF↔glyf (cubic↔quadratic), CFF2→CFF (`_convertCFF2ToCFF`), CFF→CFF2 |
 | **CID merging** | Dual-CID: CID offset + direct CharString copy; CID↔name-keyed conversion (incl. cmap format 14 UVS) |
 | **Variable fonts** | Main VF preserved in output (CFF2/HVAR/STAT/fvar kept & extended); base VF glyphs keep their `gvar` deltas (HVAR rebuilt from phantom points) when both fonts share the same axis space and `avar` |
+| **Cross-design-space composition** | Base `gvar` deltas re-parameterized into the merged normalized space (hat decomposition in `format/axis_mapping.py`), base-only axes added, different ranges/`avar` handled by user-space clamping + exact hat splitting; verify gate with fallback; policy parameters `compose_variations`/`compose_range`/`compose_fit`/`avar_mode` |
 | **Axis union** | Union of main/base axis spaces; varStore (incl. GDEF/HVAR/MVAR) constant-axis region extension |
 | **OpenType feature merging** | Base GSUB/GPOS/GDEF pruned via Subsetter closure, then appended; same-tag features are **unioned** into one record, base scripts/lang-systems are merged so the appended features stay reachable, `FeatureVariations` feature indices are rewritten after the re-sort, GDEF classes/VarStore/MarkGlyphSets take the union (+ `LookupFlag` bit4 `MarkFilteringSet` remap) |
 | **Scale + baseline offset** | Pen-pipeline outline rebuild (T2CharStringPen/TTGlyphPen + TransformPen) with synced metrics |
@@ -196,6 +198,27 @@ result = merge_fonts("main.otf", ["base1.otf", "base2.ttf"])
 result = merge_fonts("main.otf", ["base.otf"], answers={"vOTF_sOTF": "静态"})
 ```
 
+#### Cross-design-space composition parameters
+
+When main and base are both variable with **different** axis sets/ranges or a
+different `avar`, the base deltas must be re-parameterized into the merged
+normalized space. These parameters are policy knobs for that step; the defaults
+are the ones recommended for "most faithful to the designer's intent":
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `compose_variations` | `True` | Master switch. When the composed result fails the grid self-check the merger **falls back** to the legacy behaviour (base instanced at its default) and logs a warning, so enabling this can never produce a worse font than before. |
+| `compose_range` | `"main+extra"` | Which range an axis takes in the merged font: `"main+extra"` = shared axes keep the **main** font's range, axes only the base has are added with the base's range; `"union"` = widest of both (larger interpolation-extrapolation error and up to ×28 more tuples before knot pruning); `"main"` = only the main font's axes, base axes are clamped away. |
+| `compose_fit` | `"exact"` | `"exact"` = the base's tuples are split exactly onto the merged knot grid (pointwise equality, more tuples); `"affine"` = fit a single hat per tuple in the merged space (compact, but off by ~6 units on real fonts, so the self-check usually rejects it). |
+| `avar_mode` | `0` | `0` = keep the main font's `avar` (most faithful to the main designer; needs the phantom-point master when the defaults differ); `1` = drop the base's `avar` and use the main's for both; `2` = drop `avar` from the output entirely (recovers the base's variation where the main's `avar` collapses a user interval to a point). |
+| `verify_compose` | `True` | Run `verify_composition()` on a small grid of the merged axes before accepting the composed outline/hmtx data; on failure, warn + fall back. |
+
+```python
+# Cross-design-space merge: base contributes base-only axes and its own avar
+merger = FontMerger(compose_variations=True, compose_range="main+extra", avar_mode=0)
+r = merger.merge_two("ZedText-VF.ttf", "InterVariable.ttf")
+```
+
 ### Merging same-source webfont subsets (`merge_subsets`)
 
 When a variable font is shipped as N webfont subsets (one `@font-face` +
@@ -235,7 +258,7 @@ merged = merge_subsets(paths, out_path="Merged.ttf", tag="ja", verify=True)
 ## Known Limitations
 
 1. **JP (CID CFF2) as the main font** (matrix cells C1/D1): the merge itself succeeds (~18,600–18,868 glyphs), but the save stage can leave incomplete cmap format-4 references for base Latin glyphs; the matrix generator falls back to a static-instanced path. A true variable output requires solving deeper CFF2 CID namespace issues.
-2. **Base-glyph variation across design spaces**: when main and base are both variable **and share the same axis space and `avar`**, the base glyphs' `gvar` deltas are transferred to the merged font and `HVAR` is rebuilt from the phantom points, so they keep animating along the axes (`axes_compatible()` gates this). When the design spaces differ (different axis sets/ranges or a different `avar`), base glyphs are still merged at the base's default instance and stay constant; composing two different design spaces is the domain of `fontTools.varLib.merger`/`varLib.build` and is intentionally not attempted here.
+2. **Base-glyph variation across design spaces**: when main and base are both variable and share the same axis space and `avar`, the base glyphs' `gvar` deltas are transferred 1:1 and `HVAR` is rebuilt from the phantom points (`axes_compatible()`). When the design spaces differ (different axis sets/ranges or a different `avar`), the base deltas are **composed** — re-parameterized into the merged normalized space by `format/axis_mapping.py` — and the result is accepted only if the `verify_composition` grid check passes (tolerance 1 unit), otherwise the merge transparently falls back to instancing the base at its default. Remaining gaps in this path: (a) it needs **both** fonts to be `glyf`+`gvar` — a CFF2 base still falls back to instancing, and CFF2 blend composition is not implemented yet; (b) the merged `avar` is the main font's, so an axis range that the main font compresses to a single normalized point (`collapsing_flats()`) cannot keep the base's variation across that interval — the merger detects this, warns, and keeps the main behaviour (pass `avar_mode=2` to drop `avar` entirely and recover the base's variation, at the cost of changing the main font's interpolation); (c) layout-table variation data (`GDEF` `ItemVariationStore`) is still merged statically, so kerning/mark variation contributed by the base is frozen at the base default.
 3. **OpenType features**: appended base features are merged only if all referenced glyphs exist in the main font (otherwise the lookup is skipped). Same-tag features are unioned into one record, base scripts/lang-systems are merged so the appended features stay reachable, `FeatureVariations` feature indices are rewritten after the re-sort (the table itself is preserved; records whose index cannot be mapped are dropped), and GDEF `GlyphClassDef`/`MarkAttachClassDef`/`MarkGlyphSetsDef` plus the `ItemVariationStore` take the union with `LookupFlag` bit4 `MarkFilteringSet` indices remapped. Base-font `FeatureVariations` are not merged in the heterogeneous path (only the main font's are preserved).
 4. **VORG**: values are correct when instancing at the default axis position; non-default positions need recomputation.
 5. **Multi-level OT features**: a feature already merged at an earlier level is re-detected at later levels (idempotent, but lookups may become redundant).

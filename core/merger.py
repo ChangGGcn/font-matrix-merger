@@ -148,6 +148,150 @@ def transfer_glyph_variations(result, base_var, glyph_names):
     return moved
 
 
+def _copy_axis_records(src_font, dst_font, merged_fvar, merged_avar):
+    """把合并轴空间写进主字体: fvar (含打底独有轴) + avar + 轴名记录。"""
+    from fontTools.ttLib.tables._f_v_a_r import Axis
+
+    src_axes = {a.axisTag: a for a in src_font["fvar"].axes}
+    dst_axes = {a.axisTag: a for a in dst_font["fvar"].axes}
+    new_axes = []
+    for tag, (lo, default, hi) in merged_fvar.items():
+        if tag in dst_axes:
+            axis = dst_axes[tag]
+            axis.minValue, axis.defaultValue, axis.maxValue = lo, default, hi
+        elif tag in src_axes:                # 打底独有轴: 连轴名一起搬过来
+            axis = copy.deepcopy(src_axes[tag])
+            axis.minValue, axis.defaultValue, axis.maxValue = lo, default, hi
+            _copy_name_records(src_font, dst_font, axis.axisNameID)
+        else:
+            axis = Axis()
+            axis.axisTag = tag
+            axis.minValue, axis.defaultValue, axis.maxValue = lo, default, hi
+            axis.axisNameID = 256
+        new_axes.append(axis)
+    dst_font["fvar"].axes = new_axes
+
+    if merged_avar:
+        if "avar" in dst_font:
+            dst_font["avar"].segments = {k: dict(v) for k, v in merged_avar.items()}
+        else:
+            from fontTools.ttLib import newTable
+            avar = newTable("avar")
+            avar.segments = {k: dict(v) for k, v in merged_avar.items()}
+            dst_font["avar"] = avar
+    elif "avar" in dst_font:
+        del dst_font["avar"]                # avar_mode=2: 完全不用 avar
+
+
+def _copy_name_records(src_font, dst_font, name_id):
+    """确保 nameID 在两个字体里都有记录 (打底独有轴的名字)"""
+    if "name" not in src_font or "name" not in dst_font:
+        return
+    have = {(r.nameID, r.platformID, r.platEncID, r.langID)
+            for r in dst_font["name"].names}
+    for rec in src_font["name"].names:
+        if rec.nameID != name_id:
+            continue
+        key = (rec.nameID, rec.platformID, rec.platEncID, rec.langID)
+        if key not in have:
+            dst_font["name"].names.append(copy.deepcopy(rec))
+
+
+def _apply_axis_plan(main_font, base_font, range_policy, avar_mode, fit):
+    """按策略把主字体扩成合并轴空间, 并重参数化主字体自身的增量。
+
+    Returns:
+        plan = {"fvar":…, "avar":…, "base_maps":…} 或 None (不可合成)
+    """
+    from ..format.variation_compose import (plan_axis_space,
+                                            reparametrize_gvar)
+    from ..format.axis_mapping import AxisMapping
+
+    _force_load_axis_tables(main_font)
+
+    merged_fvar, merged_avar, base_maps = plan_axis_space(
+        main_font, base_font, range_policy=range_policy, avar_mode=avar_mode)
+    if not merged_fvar or not base_maps:
+        return None
+    # 主字体自身也要重参数化吗? (范围并集 / 放弃 avar 时归一化变了)
+    main_axes = {a.axisTag: (a.minValue, a.defaultValue, a.maxValue)
+                 for a in main_font["fvar"].axes}
+    from ..format.axis_mapping import avar_segments
+    main_avar = avar_segments(main_font) if avar_mode != 2 else {}
+    main_maps = {}
+    needs_main = False
+    for tag, triple in main_axes.items():
+        if tag not in merged_fvar:
+            continue
+        m = AxisMapping(merged_fvar[tag], merged_avar.get(tag),
+                        triple, main_avar.get(tag))
+        main_maps[tag] = m
+        if not m.is_identity():
+            needs_main = True
+    if needs_main and "gvar" in main_font:
+        source = copy.deepcopy(main_font)
+        reparametrize_gvar(main_font, source, main_maps,
+                           list(main_font.getGlyphOrder()), fit=fit)
+    if needs_main and "GDEF" in main_font:
+        gdef = main_font["GDEF"].table
+        if getattr(gdef, "VarStore", None) is not None:
+            print("  [告警] 主字体轴空间被改写 (compose_range/avar_mode), 但主的 "
+                  "GDEF/GPOS 变化数据 (VariationIndex) 未重参数化: "
+                  "建议使用默认 compose_range='main+extra' / avar_mode=0")
+    _copy_axis_records(base_font, main_font, merged_fvar, merged_avar)
+    return {"fvar": merged_fvar, "avar": merged_avar, "base_maps": base_maps,
+            "main_maps": main_maps}
+
+
+def _finish_variable_merge(merger, result, m, b, variable_source, plan):
+    """字形合并后的可变数据收尾: 跨设计空间合成 (含自检) 或增量搬运。
+
+    合成自检失败会向上抛异常, 由 FontMerger._do_merge 回退到旧路径;
+    这里返回"实际新增的字形名"列表 (含组件闭包补进来的)。
+    """
+    main_names = set(m.getGlyphOrder())
+    added_now = [gn for gn in result.getGlyphOrder() if gn not in main_names]
+    if plan is not None:
+        from ..format.variation_compose import reparametrize_gvar
+        stats = reparametrize_gvar(result, variable_source, plan["base_maps"],
+                                   added_now, fit=merger.compose_fit)
+        if stats["glyphs"] and "gvar" in result:
+            from fontTools.varLib.hvar import add_HVAR
+            add_HVAR(result)
+        moved = stats["glyphs"]
+        print("  [合成] %d 个新增字形按合并空间重参数化 (tuple %d → %d)"
+              % (moved, stats["tuples_in"], stats["tuples_out"]))
+        if merger.verify_compose:
+            from .verify import verify_composition
+            verify_composition(result, m, variable_source, added_now,
+                               max_positions=4)
+    elif variable_source is not None:
+        moved = transfer_glyph_variations(result, variable_source, added_now)
+        if moved:
+            print(f"  [增量] {moved} 个新增字形保留轴变化 (gvar 增量搬运)")
+    return added_now
+
+
+def _force_load_axis_tables(font):
+    """轴数变化前把"按轴数编码"的表读进内存。
+
+    否则之后从 reader 读到的是旧轴数的二进制 (gvar.axisCount 等), 与新的
+    fvar 不一致, instancer 会直接断言失败 (实测 (2, 1, ['wght','opsz']))。
+    """
+    for tag in ("gvar", "HVAR", "VVAR", "MVAR", "cvar", "avar", "STAT"):
+        if tag in font:
+            font[tag]
+
+
+def _collapsing_flats(plan):
+    """合并 avar 的压缩平台段 (该区间无法逐点等价, 需要告警)"""
+    out = []
+    for tag, mapping in plan.get("base_maps", {}).items():
+        for norm, lo, hi in mapping.collapsing_flats():
+            out.append((tag, norm, lo, hi))
+    return out
+
+
 def _remove_ros(font):
     """从 CFF 字体移除 ROS/FDSelect/FDArray, 转回 name-keyed"""
     if "CFF " not in font:
@@ -223,8 +367,26 @@ def _normalize_upm(main_font, base_font):
 
 
 class FontMerger:
-    def __init__(self):
+    """字体合并器。
+
+    跨设计空间合成的策略参数 (默认值即交互式 CLI 行为):
+        compose_variations: 是否启用"打底字形随轴变化"的跨设计空间合成
+        compose_range: "main+extra" (共有轴用主范围 + 打底独有轴) |
+                       "union" (并集) | "main" (仅主范围) —— 高级参数
+        compose_fit: "exact" (精确拆 hat) | "affine" (仅仿射, 体积最小) —— 高级参数
+        avar_mode: 0=尊重主 avar (打底重参数化到主空间); 1=忽略打底 avar;
+                   2=完全不用 avar
+        verify_compose: 合成后跑网格采样自检, 不通过则回退到默认实例合并
+    """
+
+    def __init__(self, compose_variations=True, compose_range="main+extra",
+                 compose_fit="exact", avar_mode=0, verify_compose=True):
         self.mem = {}
+        self.compose_variations = compose_variations
+        self.compose_range = compose_range
+        self.compose_fit = compose_fit
+        self.avar_mode = avar_mode
+        self.verify_compose = verify_compose
 
     def ask(self, key, q, opts=None):
         if key in self.mem:
@@ -278,17 +440,45 @@ class FontMerger:
             if not bs and bt:       return self._vTTF_vTTF(m, b)
 
     def _do_merge(self, m, b, variable_source=None):
-        """合并一级。
+        """合并一级 (可变打底: 先试跨设计空间合成, 失败回退默认实例合并)。
 
         Args:
             m: 主字体
-            b: 打底字体 (可变打底已实例化为静态)
-            variable_source: 打底**实例化之前**的可变字体; 轴空间一致时
-                用它把逐字形 gvar 增量搬回来 (否则打底字形停在默认实例)
+            b: 打底字体 (原始对象; 可变时由本函数决定如何实例化)
+            variable_source: 打底的可变字体 (启用合成/增量搬运时使用)
         """
+        if variable_source is not None and self.compose_variations:
+            try:
+                return self._do_merge_once(m, b, variable_source, compose=True)
+            except Exception as e:
+                print(f"  [合成] 回退到默认实例合并: {e}")
+        return self._do_merge_once(m, b, variable_source, compose=False)
+
+    def _do_merge_once(self, m, b, variable_source=None, compose=False):
+        plan = None
+        if variable_source is not None:
+            if compose:
+                from ..format.variation_compose import instance_at_merged_default
+                m = copy.deepcopy(m)
+                # UPM 先归一: 后续所有增量/轮廓都按主字体 UPM 表达
+                variable_source = _normalize_upm(m, variable_source)
+                plan = _apply_axis_plan(m, variable_source, self.compose_range,
+                                        self.avar_mode, self.compose_fit)
+                if plan is None:
+                    raise RuntimeError("轴空间无法规划 (见 compose_range 参数)")
+                b = instance_at_merged_default(variable_source, plan["fvar"])
+                for tag, norm, lo, hi in _collapsing_flats(plan):
+                    print(f"  [告警] 合并 avar 的轴 {tag} 把用户区间 "
+                          f"[{lo:.0f}, {hi:.0f}] 压成归一化点 {norm:.3f}: "
+                          f"该区间无法逐点等价 (可改用 avar_mode=2)")
+            elif is_variable(b):
+                # 旧路径: 轴并集 (仅轴空间) + 打底按自身默认实例化
+                _force_load_axis_tables(m)
+                m = self._axis_union(m, variable_source)
+                if not axes_compatible(m, variable_source):
+                    variable_source = None
+                b = variable_to_static(b)
         # ── 预处理 ──
-        if variable_source is not None and not axes_compatible(m, variable_source):
-            variable_source = None
         b = _normalize_upm(m, b)
 
         from ..format.cid_convert import _is_cid_font, ensure_cid_format, cid_to_name
@@ -382,28 +572,24 @@ class FontMerger:
         CHUNK_SIZE = 5000
         if len(to_add) > CHUNK_SIZE:
             return self._chunked_merge(m, b, to_add, CHUNK_SIZE,
-                                       variable_source)
+                                       variable_source, plan)
 
         try:
             result = merge_glyphs_via_ttx(m, b, to_add)
-            print(f"  合并后字形: {len(result.getGlyphOrder())}")
-            if variable_source is not None:
-                # 注意: 实际新增的除 to_add 外还有"组件闭包"补进来的字形
-                main_names = set(m.getGlyphOrder())
-                added_now = [gn for gn in result.getGlyphOrder()
-                             if gn not in main_names]
-                moved = transfer_glyph_variations(result, variable_source,
-                                                  added_now)
-                if moved:
-                    print(f"  [增量] {moved} 个新增字形保留轴变化 (gvar 增量搬运)")
-            # 合并打底 OT 特性 (修剪到仅与保留字形相关, 冲突以主为准)
-            _merge_base_layout_once(result, b, to_add)
-            return result
         except Exception as e:
             print(f"  [合并失败] {e}")
             return copy.deepcopy(m)
+        print(f"  合并后字形: {len(result.getGlyphOrder())}")
+        # 可变数据收尾: 合成自检失败要向上抛 (由 _do_merge 回退到旧路径),
+        # 不能在这里被当成"字形合并失败"吞掉
+        added_now = _finish_variable_merge(self, result, m, b, variable_source,
+                                           plan)
+        # 合并打底 OT 特性 (修剪到仅与保留字形相关, 冲突以主为准)
+        _merge_base_layout_once(result, b, to_add)
+        return result
 
-    def _chunked_merge(self, m, b, to_add, chunk_size, variable_source=None):
+    def _chunked_merge(self, m, b, to_add, chunk_size, variable_source=None,
+                       plan=None):
         """分块合并: 将打底字体按 chunk_size 拆分, 逐块合并到主字体"""
         chunks = [to_add[i:i+chunk_size] for i in range(0, len(to_add), chunk_size)]
         print(f"  [分块] {len(chunks)} 块, 每块 ≤{chunk_size} 字形")
@@ -416,13 +602,7 @@ class FontMerger:
             except Exception as e:
                 print(f"失败: {e}")
                 return current if len(current.getGlyphOrder()) > len(m.getGlyphOrder()) else copy.deepcopy(m)
-        if variable_source is not None:
-            main_names = set(m.getGlyphOrder())
-            added_now = [gn for gn in current.getGlyphOrder()
-                         if gn not in main_names]
-            moved = transfer_glyph_variations(current, variable_source, added_now)
-            if moved:
-                print(f"  [增量] {moved} 个新增字形保留轴变化 (gvar 增量搬运)")
+        _finish_variable_merge(self, current, m, b, variable_source, plan)
         # 分块完成后统一合并打底 OT 特性一次
         _merge_base_layout_once(current, b, to_add)
         return current
@@ -468,30 +648,18 @@ class FontMerger:
         return self._do_merge(m, b)
 
     # ---- 可变+可变 ----
-    # 打底是 glyf 可变字体时, 实例化前先留一份: 轴空间一致则把逐字形 gvar
-    # 增量搬进合并结果 (否则新增字形会停在默认实例, 丢失轴变化)
-    @staticmethod
-    def _var_source(b):
-        return b if (is_variable(b) and "glyf" in b) else None
-
+    # 打底可变时把**原始对象**交给 _do_merge: 它先试跨设计空间合成
+    # (必要处插值出新 master), 失败再回退到"按打底默认实例化"。
     def _vOTF_vOTF(self, m, b):
-        src = self._var_source(b)
-        m = self._axis_union(m, b)
-        return self._do_merge(m, variable_to_static(b), src)
+        return self._do_merge(m, b, variable_source=b)
     def _vOTF_vTTF(self, m, b):
         self.ask("vOTF_vTTF", "OTF/TTF？", ["OTF", "TTF"])
-        src = self._var_source(b)
-        m = self._axis_union(m, b)
-        return self._do_merge(m, variable_to_static(b), src)
+        return self._do_merge(m, b, variable_source=b)
     def _vTTF_vOTF(self, m, b):
         self.ask("vTTF_vOTF", "TTF/OTF？", ["TTF", "OTF"])
-        src = self._var_source(b)
-        m = self._axis_union(m, b)
-        return self._do_merge(m, variable_to_static(b), src)
+        return self._do_merge(m, b, variable_source=b)
     def _vTTF_vTTF(self, m, b):
-        src = self._var_source(b)
-        m = self._axis_union(m, b)
-        return self._do_merge(m, variable_to_static(b), src)
+        return self._do_merge(m, b, variable_source=b)
 
     @staticmethod
     def _axis_union(m, b):

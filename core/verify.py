@@ -384,6 +384,67 @@ _GLYPH_NAME_ATTRS = ("glyphs", "Substitute", "SecondGlyph", "Component",
                      "Input", "Backtrack", "LookAhead")
 
 
+def verify_composition(merged, main_font, base_font, added_glyphs, sample=30,
+                       tolerance=1.0, max_positions=6, verbose=False):
+    """验证跨设计空间合成是否逐点等价 (不通过抛 AssertionError)。
+
+    语义: 合并字体在位置 p 的实例, 其**新增字形**应等于打底字体在 p (按各自
+    轴投影) 的实例, **主字体字形**应等于主字体在 p 的实例。网格采样, 抽样比对
+    轮廓与 hmtx; 容差默认 1 单位 (整数化/F2Dot14 量化级别)。
+
+    调用方 (FontMerger) 在自检失败时回退到按打底默认实例化的旧行为。
+    """
+    positions = grid_positions(merged, max_positions=max_positions)
+    if sample and len(added_glyphs) > sample:
+        step = max(1, len(added_glyphs) // sample)
+        added_glyphs = added_glyphs[::step][:sample]
+    main_glyphs = [g for g in main_font.getGlyphOrder() if g != ".notdef"]
+    if sample and len(main_glyphs) > sample:
+        step = max(1, len(main_glyphs) // sample)
+        main_glyphs = main_glyphs[::step][:sample]
+
+    worst = 0.0
+    checked = 0
+    for pos in positions:
+        label = _label(pos, merged)
+        inst_merged = _instance(merged, pos)
+        inst_base = _instance(base_font, pos)
+        inst_main = _instance(main_font, pos)
+        sets = (inst_merged.getGlyphSet(), inst_base.getGlyphSet(),
+                inst_main.getGlyphSet())
+        for gn in added_glyphs:
+            if gn not in sets[1]:
+                continue
+            ok, w = _coords_delta(_pen_value(inst_merged, gn, sets[0]),
+                                  _pen_value(inst_base, gn, sets[1]), tolerance)
+            worst = max(worst, w)
+            checked += 1
+            if not ok:
+                raise AssertionError(
+                    "合成自检失败 (%s): 新增字形 %s 与打底实例不一致 (最大偏差 %s)"
+                    % (label, gn, w))
+            adv_m = inst_merged["hmtx"][gn][0]
+            adv_b = inst_base["hmtx"][gn][0]
+            if abs(adv_m - adv_b) > tolerance:
+                raise AssertionError(
+                    "合成自检失败 (%s): 新增字形 %s 的字宽不一致 (%s vs %s)"
+                    % (label, gn, adv_m, adv_b))
+        for gn in main_glyphs:
+            if gn not in sets[2]:
+                continue
+            ok, w = _coords_delta(_pen_value(inst_merged, gn, sets[0]),
+                                  _pen_value(inst_main, gn, sets[2]), tolerance)
+            worst = max(worst, w)
+            checked += 1
+            if not ok:
+                raise AssertionError(
+                    "合成自检失败 (%s): 主字体字形 %s 被改动 (最大偏差 %s)"
+                    % (label, gn, w))
+    if verbose:
+        print("  [合成自检] %d 个位置 × %d 字形, 最大偏差 %.2f"
+              % (len(positions), checked, worst))
+    return {"positions": len(positions), "checked": checked, "worst": worst}
+
 def _check_layout_integrity(font):
     """检查布局表: 悬空字形引用 + Coverage 是否按 GID 升序
 

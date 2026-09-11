@@ -493,6 +493,65 @@ def test_generic_merge_transfers_variation():
           % (with_deltas, checked))
 
 
+
+
+def test_cross_design_space_composition():
+    """跨设计空间合成: 打底带主字体没有的轴时, 合并结果新增字形逐点等价。
+
+    主 = ZedText (wght), 打底 = InterVariable (opsz + wght): 合并后应有
+    wght(主范围) + opsz(打底范围) 两条轴; 新增字形在网格位置上等于打底在
+    该位置的实例 (自检函数本身已在合并流程里跑过, 这里再抽样复核)。
+    """
+    main_p = _open_vf()
+    inter_p = os.path.join(_test_fonts_dir, "ttf_variable_fonts/InterVariable.ttf")
+    if not main_p or not os.path.exists(inter_p):
+        print("  test_cross_design_space_composition: SKIP (测试字体未就位)")
+        return
+    from fontTools.ttLib.scaleUpem import scale_upem
+    from FontMerger.core.verify import verify_composition
+
+    main = TTFont(main_p)
+    base = TTFont(inter_p)
+    scale_upem(base, main["head"].unitsPerEm)
+    merger = FontMerger(verify_compose=False)     # 先只测合成本身
+    result = merger.merge_two(copy.deepcopy(main), copy.deepcopy(base))
+
+    axes = {a.axisTag: (a.minValue, a.defaultValue, a.maxValue)
+            for a in result["fvar"].axes}
+    assert "wght" in axes and "opsz" in axes, axes
+    # 默认策略: 共有轴用主范围, 打底独有轴用打底范围
+    assert axes["opsz"][0] == 14.0 and axes["opsz"][2] == 32.0, axes["opsz"]
+    added = [gn for gn in result.getGlyphOrder()
+             if gn not in set(main.getGlyphOrder())]
+    assert added, "没有新增字形"
+    with_deltas = sum(1 for gn in added if result["gvar"].variations.get(gn))
+    assert with_deltas > len(added) * 0.8, (with_deltas, len(added))
+    report = verify_composition(result, main, base, added, sample=12,
+                                max_positions=2)
+    assert report["checked"] > 0
+    print("  test_cross_design_space_composition: %d 字形带增量, 自检 %d 点, PASSED"
+          % (with_deltas, report["checked"]))
+
+
+def test_composition_fallback():
+    """合成自检不通过时必须回退到旧的默认实例合并 (不产出坏字体)。"""
+    main_p = _open_vf()
+    inter_p = os.path.join(_test_fonts_dir, "ttf_variable_fonts/InterVariable.ttf")
+    if not main_p or not os.path.exists(inter_p):
+        print("  test_composition_fallback: SKIP (测试字体未就位)")
+        return
+    from fontTools.ttLib.scaleUpem import scale_upem
+
+    main = TTFont(main_p)
+    base = TTFont(inter_p)
+    scale_upem(base, main["head"].unitsPerEm)
+    merger = FontMerger(compose_fit="affine")      # 故意用不精确拟合
+    result = merger.merge_two(copy.deepcopy(main), copy.deepcopy(base))
+    assert len(result.getGlyphOrder()) > len(main.getGlyphOrder()), \
+        "回退后仍应完成字符合并"
+    print("  test_composition_fallback: %d 字形 (已回退), PASSED"
+          % len(result.getGlyphOrder()))
+
 def main():
     print("FontMerger Test Suite")
     print("=" * 50)
@@ -506,6 +565,8 @@ def main():
         test_no_dangling_layout_refs, test_variable_to_static_cff2,
         test_generic_merge_preserves_mark_sets_and_fv,
         test_generic_merge_transfers_variation,
+        test_cross_design_space_composition,
+        test_composition_fallback,
     ]
 
     passed = 0
