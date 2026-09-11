@@ -16,12 +16,13 @@
     即"必要时插值出新 master"。
 """
 import copy
+import itertools
 
 from fontTools.ttLib.tables import otTables as ot
 from fontTools.varLib.instancer import instantiateVariableFont
 
-from .axis_mapping import (AxisMapping, avar_segments, fvar_triples,
-                           refine_support_rebased)
+from .axis_mapping import (AxisMapping, avar_segments, evaluate_supports,
+                           fvar_triples, refine_support_rebased, support_value)
 
 
 def plan_axis_space(main_font, base_font, range_policy="main+extra",
@@ -161,97 +162,156 @@ def reparametrize_gvar(merged_font, source_font, mappings, glyph_names=None,
     return stats
 
 
-def reparametrize_var_store(var_store, mappings, fit="exact"):
-    """把 ItemVariationStore 的 region 从源空间重参数化到合并空间。
+#: 空支撑 = 标量恒 1 的"恒定 region"。OT 语义: 某轴 peakCoord = 0 时该轴被忽略,
+#: 全轴 peak 都为 0 的 region 标量恒 1 —— 于是"合并默认点取值 C"可以作为一个
+#: 额外的列承载, 不必去改 GPOS 的静态值。
+CONSTANT_SUPPORT = {}
 
-    GDEF/GPOS 的 VariationIndex 用 (VarData 序号, region 序号) 索引 store;
-    region 的 (start, peak, end) 是归一化坐标, 跨设计空间时必须重参数化 ——
-    一个 region 可能展开成多个 hat, 此时该列的增量按权重复制到各 hat。
+
+def _store_region_supports(var_store, src_tags):
+    """VarStore 的每个 region → {轴 tag: (start, peak, end)}"""
+    out = []
+    for region in var_store.VarRegionList.Region:
+        sup = {}
+        for i, ax in enumerate(region.VarRegionAxis):
+            if i < len(src_tags):
+                sup[src_tags[i]] = (float(ax.StartCoord), float(ax.PeakCoord),
+                                    float(ax.EndCoord))
+        out.append(sup)
+    return out
+
+
+def _make_region(support, dst_tags):
+    """按目标轴序构造 VarRegion (目标有而源没有的轴 = 恒定 0)"""
+    region = ot.VarRegion()
+    region.VarRegionAxis = []
+    for tag in dst_tags:
+        start, peak, end = support.get(tag, (0.0, 0.0, 0.0))
+        axis = ot.VarRegionAxis()
+        axis.StartCoord, axis.PeakCoord, axis.EndCoord = (float(start),
+                                                          float(peak),
+                                                          float(end))
+        region.VarRegionAxis.append(axis)
+    return region
+
+
+def _num_shorts(rows, orig=0):
+    """VarData.wordDeltaCount: 前 n 个增量按 int16 存, 其余按 int8"""
+    long_words = bool(orig & 0x8000)
+    limit = 32767 if long_words else 127
+    n1 = 0
+    for row in rows:
+        for i, v in enumerate(row):
+            if abs(v) > limit:
+                n1 = max(n1, i + 1)
+    return n1 | (0x8000 if long_words else 0)
+
+
+def reparametrize_var_store(var_store, mappings, src_tags, dst_tags=None,
+                            folded_default=False, eps=1e-4):
+    """ItemVariationStore 的 region 从源轴空间重参数化到合并轴空间 (行保持)。
+
+    VariationIndex 的 (outer, inner) = (VarData 序号, 该 VarData 的**行号**):
+    引擎取这一行的增量向量与各列 region 的标量做点积。也就是说一行可以承载
+    **多个** hat (列 = hat, 行值 = 权重) —— 与 gvar 的元组体系同构, 因此可以
+    **精确**重参数化, 不存在"一个设备只能一个 region"的限制:
+
+      * φ_S(T(x)) 精确分解成 Σ_k w_k·φ_{S_k}(x) + C  (refine_support_rebased);
+      * 新 region 表 = 所有分解项的并集 (+ 恒定 region, 见 folded_default);
+      * **行保持**: ItemCount 与行序不变, 行增量按权重重分配到新列, 于是
+        所有 (outer, inner) 引用无需重写 (并集时的 outer 基址偏移机制照旧)。
+
+    Args:
+        var_store: otTables.VarStore 或 None
+        mappings: {轴 tag: AxisMapping} —— 合并空间 → 源空间
+        src_tags: 源字体的 fvar 轴序 (VarRegionAxis 下标含义)
+        dst_tags: 合并字体的 fvar 轴序 (缺省同 src_tags)
+        folded_default: 静态值里是否已经折入了"合并默认点"的贡献。打底布局在
+            合并默认点实例化后即如此 —— 此时必须丢掉常数 C (否则会重复计入);
+            False 时 C 由一个峰值全 0 的恒定 region 承载 (标量恒 1)。
+
+    Returns:
+        (new_var_store, report); report: regions/columns_in/columns_out/
+        constant/changed
     """
+    report = {"regions": 0, "columns_in": 0, "columns_out": 0,
+              "constant": False, "changed": False}
     if var_store is None:
-        return None
-    src_regions = list(var_store.VarRegionList.Region)
-    region_terms = []          # 每个源 region -> [(sig, support, weight)]
-    for region in src_regions:
-        support = {}
-        for tag, axis in enumerate(region.VarRegionAxis):
-            support[tag] = (axis.StartCoord, axis.PeakCoord, axis.EndCoord)
-        region_terms.append(support)
-    # 轴序: VarRegionAxis 的顺序对应 fvar 轴序, 这里用 fvar 轴 tag 重建
-    return _rebuild_var_store(var_store, src_regions, mappings, fit)
+        return None, report
+    dst_tags = list(dst_tags if dst_tags is not None else src_tags)
+    src_regions = _store_region_supports(var_store, src_tags)
+    report["regions"] = len(src_regions)
 
-
-def _rebuild_var_store(var_store, src_regions, mappings, fit):
-    """内部: 逐 VarData 重建 (region 索引是 VarData 局部的)"""
-    from .axis_mapping import refine_support_rebased as _refine
-
-    axis_tags = list(mappings.keys())
     new_regions = []
-    new_index = {}
+    region_index = {}
 
-    def region_index(support):
-        key = tuple(sorted((t, tuple(v)) for t, v in support.items()))
-        if key not in new_index:
-            new_index[key] = len(new_regions)
+    def index_of(support):
+        key = tuple(sorted((tag, tuple(round(v, 9) for v in sup))
+                           for tag, sup in support.items()))
+        if key not in region_index:
+            region_index[key] = len(new_regions)
             new_regions.append(support)
-        return new_index[key]
+        return region_index[key]
+
+    # 每个源 region 的"新列计划": (新 region 下标, 权重) 列表
+    plans = []
+    for sup in src_regions:
+        if not sup:                       # 恒定 region: 原样保留
+            plans.append([(index_of(CONSTANT_SUPPORT), 1.0)])
+            continue
+        constant, terms = refine_support_rebased(sup, mappings, eps)
+        if folded_default:
+            constant = 0.0
+        agg = {}                          # 相同新 region 的权重先合并
+        order = []
+        for term_support, weight in terms:
+            idx = index_of(dict(term_support))
+            if idx not in agg:
+                order.append(idx)
+                agg[idx] = 0.0
+            agg[idx] += weight
+        cols = [(idx, agg[idx]) for idx in order if abs(agg[idx]) > eps]
+        if abs(constant) > eps:
+            cols.append((index_of(CONSTANT_SUPPORT), constant))
+            report["constant"] = True
+        plans.append(cols)
 
     new_var_data = []
     for vd in var_store.VarData:
-        items = getattr(vd, "Item", None)
-        if items is None:
-            items = getattr(vd, "ItemVariationData", None) or []
-        item_count = len(items)
-        columns = {}          # 新 region 索引 -> [deltas per item]
-        for col, r_idx in enumerate(vd.VarRegionIndex):
-            support = {}
-            for ax_i, axis in enumerate(src_regions[r_idx].VarRegionAxis):
-                if ax_i < len(axis_tags):
-                    support[axis_tags[ax_i]] = (axis.StartCoord,
-                                                axis.PeakCoord,
-                                                axis.EndCoord)
-            if fit == "affine":
-                _, terms = _map_support_terms(support, mappings, fit)
-            else:
-                _, terms = _refine(support, mappings)
-            for sup, weight in terms:
-                if abs(weight) < 1e-6:
-                    continue
-                idx = region_index(sup)
-                col_out = columns.setdefault(idx, [0] * item_count)
-                for i in range(item_count):
-                    row = items[i]
-                    val = row[col] if isinstance(row, (list, tuple)) and col < len(row) else 0
-                    col_out[i] += int(round(val * weight))
-        if not columns:
-            continue
-        order = sorted(columns)
+        items = list(getattr(vd, "Item", None) or [])
+        src_index = list(vd.VarRegionIndex)
+        report["columns_in"] += len(src_index)
+        n_new = sum(len(plans[r]) for r in src_index)
+        rows = []
+        for item in items:
+            row = [0] * n_new
+            pos = 0
+            for c, r in enumerate(src_index):
+                val = (item[c] if isinstance(item, (list, tuple))
+                       and c < len(item) else 0)
+                for _idx, weight in plans[r]:
+                    row[pos] = int(round(val * weight))
+                    pos += 1
+            rows.append(row)
         nvd = ot.VarData()
-        nvd.VarRegionIndex = order
-        nvd.VarRegionCount = len(order)
-        nvd.ItemCount = item_count
-        nvd.Item = [[columns[c][i] for c in order] for i in range(item_count)]
-        nvd.NumShorts = max((len([v for v in row if v]) for row in nvd.Item),
-                            default=0)
+        nvd.VarRegionIndex = [idx for r in src_index for idx, _w in plans[r]]
+        nvd.VarRegionCount = len(nvd.VarRegionIndex)
+        nvd.ItemCount = len(rows)
+        nvd.Item = rows
+        nvd.NumShorts = _num_shorts(rows, getattr(vd, "NumShorts", 0) or 0)
+        report["columns_out"] += nvd.VarRegionCount
         new_var_data.append(nvd)
-    if not new_var_data:
-        return None
+
     out = ot.VarStore()
     out.Format = 1
     vrl = ot.VarRegionList()
-    vrl.RegionAxisCount = len(axis_tags) or 1
+    vrl.RegionAxisCount = max(1, len(dst_tags))
     vrl.RegionCount = len(new_regions)
-    vrl.Region = []
-    for support in new_regions:
-        region = ot.VarRegion()
-        region.VarRegionAxis = []
-        for tag in axis_tags:
-            axis = ot.VarRegionAxis()
-            start, peak, end = support.get(tag, (0.0, 0.0, 0.0))
-            axis.StartCoord, axis.PeakCoord, axis.EndCoord = start, peak, end
-            region.VarRegionAxis.append(axis)
-        vrl.Region.append(region)
+    vrl.Region = [_make_region(sup, dst_tags) for sup in new_regions]
     out.VarRegionList = vrl
     out.VarData = new_var_data
     out.VarDataCount = len(new_var_data)
-    return out
+    trivial = all(len(plans[i]) == 1 and plans[i][0] == (i, 1.0)
+                  for i in range(len(plans)))
+    report["changed"] = not (trivial and list(src_tags) == dst_tags)
+    return out, report

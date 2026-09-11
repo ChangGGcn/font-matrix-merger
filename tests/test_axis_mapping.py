@@ -19,7 +19,7 @@ from FontMerger.format.axis_mapping import (AxisMapping, PiecewiseLinear,
                                             fvar_triples, hat_value, refine_1d,
                                             refine_support,
                                             refine_support_rebased,
-                                            source_location)
+                                            source_location, support_value)
 
 
 def _sample(lo=-1.0, hi=1.0, n=2001):
@@ -27,10 +27,13 @@ def _sample(lo=-1.0, hi=1.0, n=2001):
 
 
 def _max_err_1d(lower, peak, upper, mapping, terms):
+    """逐点误差 —— 用**引擎语义** (supportScalar) 求和: 跨 0 的 hat 会被整条
+    忽略, 所以理想 hat 相加会漏掉这类错误 (见 test_refine_cross_zero)。"""
+    ot_terms = [({"wght": (l, p, u)}, w) for l, p, u, w in terms]
     worst = 0.0
     for x in _sample():
         want = hat_value(source_location(mapping, x), lower, peak, upper)
-        got = sum(w * hat_value(x, l, p, u) for l, p, u, w in terms)
+        got = evaluate_supports({"wght": x}, ot_terms)
         worst = max(worst, abs(want - got))
     return worst
 
@@ -315,6 +318,166 @@ def test_collapsing_flat_detection():
           % (lo, hi, norm))
 
 
+def test_refine_cross_zero():
+    """默认点不重合时, 重定基后的 hat 绝不能跨越归一化默认点 0。
+
+    0 是重定基后的零点, 同时也必须是节点: 一旦它被当成"斜率连续"的冗余点
+    剪掉, 相邻 tent 就会横跨 0 —— OT 引擎对 lower < 0 < upper 的区域整条
+    忽略 (supportScalar), 于是整个支撑的增量凭空消失 (实测误差 0.625)。
+    """
+    m = AxisMapping((-100, 400, 900), None, (0, 100, 900), None)
+    assert abs(m.to_source(0.0) - 0.375) < 1e-9       # 源默认点 ≠ 合并默认点
+    constant, terms = refine_support_rebased({"wght": (0.0, 1.0, 1.0)},
+                                             {"wght": m})
+    assert abs(constant - 0.375) < 1e-9, constant
+    assert terms, "细化结果为空"
+    for sup, _w in terms:
+        l, p, u = sup["wght"]
+        assert p != 0.0 and not (l < 0.0 < u), (l, p, u)
+    worst = 0.0
+    for x in _sample(-1.0, 1.0, 2001):
+        want = hat_value(source_location(m, x), 0.0, 1.0, 1.0)
+        got = constant + evaluate_supports({"wght": x}, terms)
+        worst = max(worst, abs(want - got))
+    assert worst < 1e-7, worst
+    print("  test_refine_cross_zero: 常数 %.3f, %d 条 hat, 误差 %.1e, PASSED"
+          % (constant, len(terms), worst))
+
+
+def _make_var_store(regions, columns, rows, num_shorts=0):
+    """构造单 VarData 的 ItemVariationStore: regions=[[(s,p,e), ...], ...]"""
+    from fontTools.ttLib.tables import otTables as ot
+
+    vs = ot.VarStore()
+    vs.Format = 1
+    vrl = ot.VarRegionList()
+    vrl.RegionAxisCount = len(regions[0]) if regions else 1
+    vrl.RegionCount = len(regions)
+    vrl.Region = []
+    for region_support in regions:
+        region = ot.VarRegion()
+        region.VarRegionAxis = []
+        for (start, peak, end) in region_support:
+            axis = ot.VarRegionAxis()
+            axis.StartCoord, axis.PeakCoord, axis.EndCoord = start, peak, end
+            region.VarRegionAxis.append(axis)
+        vrl.Region.append(region)
+    vs.VarRegionList = vrl
+    vd = ot.VarData()
+    vd.VarRegionIndex = list(columns)
+    vd.VarRegionCount = len(columns)
+    vd.ItemCount = len(rows)
+    vd.Item = [list(row) for row in rows]
+    vd.NumShorts = num_shorts
+    vs.VarData = [vd]
+    vs.VarDataCount = 1
+    return vs
+
+
+def _store_supports(var_store, tags):
+    from FontMerger.format.variation_compose import _store_region_supports
+    return _store_region_supports(var_store, tags)
+
+
+def _store_response(var_store, tags, outer, inner, loc):
+    """引擎语义: VarData[outer].Item[inner] 与各列 region 标量做点积"""
+    vd = var_store.VarData[outer]
+    sups = _store_supports(var_store, tags)
+    return sum(vd.Item[inner][c] * support_value(loc, sups[r])
+               for c, r in enumerate(vd.VarRegionIndex))
+
+
+def _source_response(src_store, mapping, outer, inner, x):
+    """源语义: Σ_c delta_c · φ_c(T(x)) —— T 由 mapping (合并 → 源) 给出"""
+    vd = src_store.VarData[outer]
+    sups = _store_supports(src_store, ["wght"])
+    return sum(vd.Item[inner][c]
+               * hat_value(source_location(mapping, x), *sups[r]["wght"])
+               for c, r in enumerate(vd.VarRegionIndex))
+
+
+def test_var_store_reparametrize():
+    """ItemVariationStore 重参数化 (行保持): 逐个位置精确复现源语义。
+
+    VariationIndex 的 (outer, inner) = (VarData 序号, **行号**): 一行的增量向量
+    与各列 region 标量做点积, 所以一行能承载多个 hat —— 重参数化可以做到
+    逐点精确 (含"合并默认点取值 C ≠ 0"的恒定列与钳制平台段)。
+    容差 1e-6: 细化出的 hat 权重本身有 ~1e-10 级浮点误差 (见随机压测)。
+    """
+    from FontMerger.format.variation_compose import reparametrize_var_store
+
+    ident = AxisMapping((0, 400, 900), None, (0, 400, 900), None)
+    # 多行 (多个设备引用), 每行增量不同 —— 行保持的直接检验
+    store = _make_var_store([[(0.0, 1.0, 1.0)]], [0], [[12], [-5], [3]])
+
+    # ① 恒等映射: 结构与增量原样保留
+    new, rep = reparametrize_var_store(store, {"wght": ident},
+                                       ["wght"], ["wght"])
+    assert rep["columns_in"] == 1 and rep["columns_out"] == 1, rep
+    assert not rep["changed"] and not rep["constant"], rep
+    assert new.VarData[0].Item == [[12], [-5], [3]]
+    assert new.VarData[0].ItemCount == 3
+
+    # ② 轴扩展 (打底独有轴 opsz): region 追加恒定轴, 增量/引用不变
+    new2, rep2 = reparametrize_var_store(store, {"wght": ident},
+                                         ["wght"], ["wght", "opsz"])
+    assert rep2["changed"] and new2.VarRegionList.RegionAxisCount == 2, rep2
+    ax = new2.VarRegionList.Region[0].VarRegionAxis
+    assert (ax[0].StartCoord, ax[0].PeakCoord, ax[0].EndCoord) == (0.0, 1.0, 1.0)
+    assert (ax[1].StartCoord, ax[1].PeakCoord, ax[1].EndCoord) == (0.0, 0.0, 0.0)
+    assert new2.VarData[0].Item == [[12], [-5], [3]]
+    assert new2.VarData[0].ItemCount == 3
+
+    # ③ 合并范围更窄 → 合成结果是一个**缩放** hat (权重 5/14): 换 region +
+    #    缩放行增量。取增量 14 的倍数使缩放在整数域精确。
+    narrow = AxisMapping((0, 400, 900), None, (0, 400, 1800), None)
+    store14 = _make_var_store([[(0.0, 1.0, 1.0)]], [0], [[14], [28]])
+    new3, rep3 = reparametrize_var_store(store14, {"wght": narrow},
+                                         ["wght"], ["wght"])
+    assert new3.VarData[0].Item == [[5], [10]], new3.VarData[0].Item
+    assert not rep3["constant"], rep3
+    for x in _sample(-1.0, 1.0, 401):
+        want = _source_response(store14, narrow, 0, 0, x)
+        got = _store_response(new3, ["wght"], 0, 0, {"wght": x})
+        assert abs(want - got) < 1e-6, (x, want, got)
+
+    # ④ 钳制平台段 (合并范围更宽): 需要两个 hat → 两列, 一行同时承载
+    plateau = AxisMapping((0, 400, 1800), None, (0, 400, 900), None)
+    new4, rep4 = reparametrize_var_store(store, {"wght": plateau},
+                                         ["wght"], ["wght"])
+    assert new4.VarData[0].VarRegionCount == 2, new4.VarData[0].VarRegionIndex
+    assert new4.VarData[0].ItemCount == 3, "行数必须保持"
+    for row in (0, 1, 2):
+        for x in _sample(-1.0, 1.0, 401):
+            want = _source_response(store, plateau, 0, row, x)
+            got = _store_response(new4, ["wght"], 0, row, {"wght": x})
+            assert abs(want - got) < 1e-6, (row, x, want, got)
+
+    # ⑤ 默认点不重合 → C = φ(T(0)) ≠ 0 由一个恒定列承载 (峰值全 0, 标量恒 1);
+    #    folded_default=True (打底布局已按合并默认实例化) 时不能加恒定列。
+    mismatch = AxisMapping((-100, 400, 900), None, (0, 100, 900), None)
+    store8 = _make_var_store([[(0.0, 1.0, 1.0)]], [0], [[8], [0]])
+    new5, rep5 = reparametrize_var_store(store8, {"wght": mismatch},
+                                         ["wght"], ["wght"])
+    assert rep5["constant"], rep5
+    for x in _sample(-1.0, 1.0, 401):
+        want = _source_response(store8, mismatch, 0, 0, x)
+        got = _store_response(new5, ["wght"], 0, 0, {"wght": x})
+        assert abs(want - got) < 1e-6, (x, want, got)
+    new6, rep6 = reparametrize_var_store(store8, {"wght": mismatch},
+                                         ["wght"], ["wght"],
+                                         folded_default=True)
+    assert not rep6["constant"], rep6
+    for x in _sample(-1.0, 1.0, 401):
+        want = (_source_response(store8, mismatch, 0, 0, x)
+                - _source_response(store8, mismatch, 0, 0, 0.0))
+        got = _store_response(new6, ["wght"], 0, 0, {"wght": x})
+        assert abs(want - got) < 1e-6, (x, want, got)
+    print("  test_var_store_reparametrize: 恒等/扩展/缩放/平台段/恒定列/折叠默认,"
+          " PASSED")
+
+
+
 def main():
     print("FontMerger axis-mapping Test Suite")
     print("=" * 50)
@@ -330,6 +493,8 @@ def main():
         test_real_avar_roundtrip,
         test_random_stress,
         test_collapsing_flat_detection,
+        test_refine_cross_zero,
+        test_var_store_reparametrize,
     ]
     passed = 0
     for test in tests:

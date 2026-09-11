@@ -264,11 +264,16 @@ def verify_merge(sources, merged, glyph_map=None, axis_positions="auto",
         failures.append("FeatureVariations 索引无效 %d 处: %s"
                         % (len(layout["bad_feature_variations"]),
                            layout["bad_feature_variations"][:3]))
+    if layout["bad_var_stores"]:
+        failures.append("ItemVariationStore/VariationIndex 结构非法 %d 处: %s"
+                        % (len(layout["bad_var_stores"]),
+                           layout["bad_var_stores"][:3]))
     log("  [布局] 悬空引用 %d, 未排序 Coverage %d, mark 集合越界 %d, "
-        "FeatureVariations 越界 %d"
+        "FeatureVariations 越界 %d, VarStore 非法 %d"
         % (len(layout["dangling"]), layout["unsorted_coverages"],
            len(layout["bad_mark_filters"]),
-           len(layout["bad_feature_variations"])))
+           len(layout["bad_feature_variations"]),
+           len(layout["bad_var_stores"])))
 
     # ---- 6. GDEF ----
     gdef_report = {"classes": 0, "mark_sets": 0, "var_store": False}
@@ -544,7 +549,74 @@ def _check_layout_integrity(font):
                         bad_feature_variations.append(
                             (tag, r_i, "lookupIndex", li, n_lookups))
 
+    bad_var_stores = _check_var_stores(font)
+
     return {"dangling": sorted(dangling),
             "unsorted_coverages": unsorted_count,
             "bad_mark_filters": bad_mark_filters,
-            "bad_feature_variations": bad_feature_variations}
+            "bad_feature_variations": bad_feature_variations,
+            "bad_var_stores": bad_var_stores}
+
+
+def _check_var_stores(font):
+    """ItemVariationStore 的结构不变量 (跨设计空间合并最容易写坏的地方)。
+
+      * 各表 VarStore 的 RegionAxisCount 必须等于 fvar 轴数 (否则是非法字体);
+      * 每个 VarData 的 VarRegionIndex 必须落在 region 表内;
+      * GPOS/GSUB 里 DeltaFormat=0x8000 的 VariationIndex 的
+        (outer=VarData 序号, inner=该 VarData 的**行号**) 必须落在 GDEF
+        VarStore 内 (一行的增量向量与各列 region 标量做点积)。
+    """
+    from fontTools.ttLib.tables import otTables as ot
+
+    problems = []
+    n_axes = len(font["fvar"].axes) if "fvar" in font else 0
+    stores = {}
+    for tag in ("GDEF", "HVAR", "VVAR", "MVAR", "BASE"):
+        if tag not in font:
+            continue
+        table = getattr(font[tag], "table", None)
+        vs = getattr(table, "VarStore", None) if table is not None else None
+        if vs is None:
+            continue
+        stores[tag] = vs
+        got = vs.VarRegionList.RegionAxisCount
+        if got != n_axes:
+            problems.append((tag, "RegionAxisCount", got, n_axes))
+        n_regions = vs.VarRegionList.RegionCount
+        for vd_i, vd in enumerate(vs.VarData):
+            for col, r in enumerate(vd.VarRegionIndex):
+                if not 0 <= r < n_regions:
+                    problems.append((tag, "VarRegionIndex", (vd_i, col, r),
+                                     n_regions))
+
+    gdef_vs = stores.get("GDEF")
+    if gdef_vs is None:
+        return problems
+    n_var_data = len(gdef_vs.VarData)
+
+    def walk_devices(obj, seen, tag):
+        if id(obj) in seen:
+            return
+        seen.add(id(obj))
+        if isinstance(obj, (list, tuple)):
+            for v in obj:
+                walk_devices(v, seen, tag)
+            return
+        if isinstance(obj, ot.Device) and getattr(obj, "DeltaFormat", 0) == 0x8000:
+            outer, inner = obj.StartSize, obj.EndSize
+            if not 0 <= outer < n_var_data:
+                problems.append((tag, "VariationIndex.outer", outer, n_var_data))
+            elif not 0 <= inner < gdef_vs.VarData[outer].ItemCount:
+                problems.append((tag, "VariationIndex.inner", (outer, inner),
+                                 gdef_vs.VarData[outer].ItemCount))
+        d = getattr(obj, "__dict__", None)
+        if not d:
+            return
+        for v in d.values():
+            walk_devices(v, seen, tag)
+
+    for tag in ("GSUB", "GPOS"):
+        if tag in font:
+            walk_devices(font[tag].table, set(), tag)
+    return problems

@@ -170,17 +170,40 @@ def _copy_axis_records(src_font, dst_font, merged_fvar, merged_avar):
             axis.axisNameID = 256
         new_axes.append(axis)
     dst_font["fvar"].axes = new_axes
+    _fill_fvar_instances(dst_font, merged_fvar)
+    for axis in new_axes:                   # 新增轴补 STAT AxisRecord
+        if axis.axisTag not in dst_axes:
+            from ..format.vf_axes import _ensure_stat_axis
+            _ensure_stat_axis(dst_font, axis)
 
     if merged_avar:
+        # avar 的 compile 会为**每条** fvar 轴取 segments[axis] —— 无 avar 的轴
+        # (打底独有轴等) 必须补恒等段, 否则保存时 KeyError
+        identity = {-1.0: -1.0, 0.0: 0.0, 1.0: 1.0}
+        segments = {tag: dict(merged_avar.get(tag) or identity)
+                    for tag in merged_fvar}
         if "avar" in dst_font:
-            dst_font["avar"].segments = {k: dict(v) for k, v in merged_avar.items()}
+            dst_font["avar"].segments = segments
         else:
             from fontTools.ttLib import newTable
             avar = newTable("avar")
-            avar.segments = {k: dict(v) for k, v in merged_avar.items()}
+            avar.segments = segments
             dst_font["avar"] = avar
     elif "avar" in dst_font:
         del dst_font["avar"]                # avar_mode=2: 完全不用 avar
+
+
+def _fill_fvar_instances(font, merged_fvar):
+    """fvar 命名实例: 新轴补默认值 (实例缺轴坐标会让 instancer 直接 KeyError)"""
+    fvar = font.get("fvar")
+    if fvar is None:
+        return
+    for inst in getattr(fvar, "instances", None) or []:
+        coords = getattr(inst, "coordinates", None)
+        if coords is None:
+            continue
+        for tag, (_lo, default, _hi) in merged_fvar.items():
+            coords.setdefault(tag, default)
 
 
 def _copy_name_records(src_font, dst_font, name_id):
@@ -195,6 +218,66 @@ def _copy_name_records(src_font, dst_font, name_id):
         key = (rec.nameID, rec.platformID, rec.platEncID, rec.langID)
         if key not in have:
             dst_font["name"].names.append(copy.deepcopy(rec))
+
+
+def _map_main_var_stores(font, mappings, src_tags, dst_tags, label="合成"):
+    """把主字体自己的 ItemVariationStore 重参数化到合并轴空间 (行保持)。
+
+    涉及 GDEF (GPOS/GSUB 的 VariationIndex 基座) 与 HVAR/VVAR/MVAR/BASE。
+    轴范围改写或新增轴时 region 的 (start, peak, end) 必须重算:
+    RegionAxisCount 与新 fvar 轴数不一致会直接写出非法字体; 共有轴范围变化
+    而不重算则会把增量解释到错误的归一化空间。行保持 → VariationIndex 的
+    (outer, inner) 引用不需要重写。
+
+    Returns:
+        {"regions", "columns_in", "columns_out", "constant"} 汇总
+    """
+    from ..format.variation_compose import reparametrize_var_store
+
+    total = {"regions": 0, "columns_in": 0, "columns_out": 0, "constant": False}
+    for tag in ("GDEF", "HVAR", "VVAR", "MVAR", "BASE"):
+        if tag not in font:
+            continue
+        table = getattr(font[tag], "table", None)
+        store = getattr(table, "VarStore", None) if table is not None else None
+        if store is None:
+            continue
+        new_store, report = reparametrize_var_store(store, mappings, src_tags,
+                                                    dst_tags)
+        table.VarStore = new_store
+        for key in ("regions", "columns_in", "columns_out"):
+            total[key] += report[key]
+        total["constant"] = total["constant"] or report["constant"]
+        print("  [%s] 主字体 %s VarStore: %d 区域, %d → %d 列%s"
+              % (label, tag, report["regions"], report["columns_in"],
+                 report["columns_out"],
+                 " (含恒定列)" if report["constant"] else ""))
+    return total
+
+
+def _reparametrize_main_after_union(main_font, before_axes, before_avar):
+    """旧回退路径的补救: 轴并集后主字体的 VarStore 也要跟着新轴空间走。
+
+    旧路径不改主字体的 gvar (历史已知限制), 但 VarStore 的区域坐标**必须**
+    重算 —— 轴数不一致是非法字体; 共有轴范围被并集撑大时, 旧坐标会把增量
+    解释到错误的归一化空间。宁可把无法精确表达的列清零也不要写错值。
+    """
+    from ..format.axis_mapping import AxisMapping, avar_segments, fvar_triples
+
+    after_axes = fvar_triples(main_font)
+    src_tags = list(before_axes)
+    dst_tags = list(after_axes)
+    if src_tags == dst_tags and all(before_axes[t] == after_axes.get(t)
+                                    for t in src_tags):
+        return None                        # 轴空间没变
+    after_avar = avar_segments(main_font)
+    mappings = {}
+    for tag in src_tags:
+        mappings[tag] = AxisMapping(after_axes.get(tag, before_axes[tag]),
+                                    after_avar.get(tag), before_axes[tag],
+                                    before_avar.get(tag))
+    return _map_main_var_stores(main_font, mappings, src_tags, dst_tags,
+                                label="回退")
 
 
 def _apply_axis_plan(main_font, base_font, range_policy, avar_mode, fit):
@@ -213,6 +296,8 @@ def _apply_axis_plan(main_font, base_font, range_policy, avar_mode, fit):
         main_font, base_font, range_policy=range_policy, avar_mode=avar_mode)
     if not merged_fvar or not base_maps:
         return None
+    src_tags = [a.axisTag for a in main_font["fvar"].axes]
+    dst_tags = list(merged_fvar)
     # 主字体自身也要重参数化吗? (范围并集 / 放弃 avar 时归一化变了)
     main_axes = {a.axisTag: (a.minValue, a.defaultValue, a.maxValue)
                  for a in main_font["fvar"].axes}
@@ -232,12 +317,12 @@ def _apply_axis_plan(main_font, base_font, range_policy, avar_mode, fit):
         source = copy.deepcopy(main_font)
         reparametrize_gvar(main_font, source, main_maps,
                            list(main_font.getGlyphOrder()), fit=fit)
-    if needs_main and "GDEF" in main_font:
-        gdef = main_font["GDEF"].table
-        if getattr(gdef, "VarStore", None) is not None:
-            print("  [告警] 主字体轴空间被改写 (compose_range/avar_mode), 但主的 "
-                  "GDEF/GPOS 变化数据 (VariationIndex) 未重参数化: "
-                  "建议使用默认 compose_range='main+extra' / avar_mode=0")
+    if needs_main or src_tags != dst_tags:
+        # 轴空间变了 (范围/avar/轴集合): 主字体自己的 ItemVariationStore
+        # (GDEF/GPOS 的 VariationIndex 基座, 以及 HVAR/VVAR/MVAR) 的 region
+        # 坐标必须跟着变 —— 轴数不一致会写出非法字体, 共有轴范围变化则会把
+        # 增量解释到错误的归一化空间。
+        _map_main_var_stores(main_font, main_maps, src_tags, dst_tags)
     _copy_axis_records(base_font, main_font, merged_fvar, merged_avar)
     return {"fvar": merged_fvar, "avar": merged_avar, "base_maps": base_maps,
             "main_maps": main_maps}
@@ -473,8 +558,11 @@ class FontMerger:
                           f"该区间无法逐点等价 (可改用 avar_mode=2)")
             elif is_variable(b):
                 # 旧路径: 轴并集 (仅轴空间) + 打底按自身默认实例化
+                from ..format.axis_mapping import avar_segments, fvar_triples
                 _force_load_axis_tables(m)
+                before_axes, before_avar = fvar_triples(m), avar_segments(m)
                 m = self._axis_union(m, variable_source)
+                _reparametrize_main_after_union(m, before_axes, before_avar)
                 if not axes_compatible(m, variable_source):
                     variable_source = None
                 b = variable_to_static(b)

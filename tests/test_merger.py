@@ -552,6 +552,54 @@ def test_composition_fallback():
     print("  test_composition_fallback: %d 字形 (已回退), PASSED"
           % len(result.getGlyphOrder()))
 
+def test_compose_main_var_store_axes():
+    """跨设计空间合成后, 主字体自己的 ItemVariationStore 必须跟上新轴空间。
+
+    主 = ZedText (wght, 带 GDEF VarStore + GPOS VariationIndex), 打底 =
+    InterVariable (opsz + wght)。合并后:
+      * 各表 VarStore 的 RegionAxisCount == fvar 轴数 (否则写出非法字体),
+        VariationIndex 的 (outer, inner) 不越界 (core.verify._check_var_stores);
+      * 主的 VarData/列/增量 1:1 保留 (默认策略下主轴映射是恒等), 新轴恒定 0。
+    """
+    main_p = _open_vf()
+    inter_p = os.path.join(_test_fonts_dir, "ttf_variable_fonts/InterVariable.ttf")
+    if not main_p or not os.path.exists(inter_p):
+        print("  test_compose_main_var_store_axes: SKIP (测试字体未就位)")
+        return
+    from fontTools.ttLib.scaleUpem import scale_upem
+    from FontMerger.core.verify import _check_var_stores
+
+    main = TTFont(main_p)
+    base = TTFont(inter_p)
+    scale_upem(base, main["head"].unitsPerEm)
+    assert "GDEF" in main and main["GDEF"].table.VarStore is not None, \
+        "夹具主字体缺少 GDEF VarStore"
+    main_vs = copy.deepcopy(main["GDEF"].table.VarStore)
+    n_main_axes = len(main["fvar"].axes)
+
+    merger = FontMerger(verify_compose=False)
+    result = merger.merge_two(copy.deepcopy(main), copy.deepcopy(base))
+
+    assert len(result["fvar"].axes) > n_main_axes, "打底独有轴没有并入"
+    problems = _check_var_stores(result)
+    assert not problems, problems[:5]
+    new_vs = result["GDEF"].table.VarStore
+    assert len(new_vs.VarData) >= len(main_vs.VarData)
+    for vd_i, vd in enumerate(main_vs.VarData):
+        nvd = new_vs.VarData[vd_i]
+        assert nvd.VarRegionIndex == vd.VarRegionIndex, (vd_i, nvd.VarRegionIndex)
+        assert nvd.Item == vd.Item, vd_i                 # 增量 1:1, 列未丢失
+    for r_i in range(main_vs.VarRegionList.RegionCount):
+        old = [(a.StartCoord, a.PeakCoord, a.EndCoord)
+               for a in main_vs.VarRegionList.Region[r_i].VarRegionAxis]
+        new = [(a.StartCoord, a.PeakCoord, a.EndCoord)
+               for a in new_vs.VarRegionList.Region[r_i].VarRegionAxis]
+        assert new[:n_main_axes] == old, (r_i, old, new)
+        assert all(t == (0.0, 0.0, 0.0) for t in new[n_main_axes:]), (r_i, new)
+    print("  test_compose_main_var_store_axes: %d VarData / %d region 保留, PASSED"
+          % (len(new_vs.VarData), new_vs.VarRegionList.RegionCount))
+
+
 def main():
     print("FontMerger Test Suite")
     print("=" * 50)
@@ -567,6 +615,7 @@ def main():
         test_generic_merge_transfers_variation,
         test_cross_design_space_composition,
         test_composition_fallback,
+        test_compose_main_var_store_axes,
     ]
 
     passed = 0

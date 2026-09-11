@@ -333,7 +333,8 @@ def refine_1d(lower, peak, upper, mapping, eps=EPS, shift=0.0):
 
     Args:
         shift: 重定基量 c = φ(T(0))。非零时被减掉 (使函数在合并默认位置
-            为 0), 并把 0 强制纳入节点 —— 保证生成的 hat 不跨 0。
+            为 0)。0 始终保留为节点, 保证生成的 hat 不跨越归一化默认点
+            (跨 0 的 hat 会被 OT 引擎整条忽略, 见 supportScalar)。
 
     Returns:
         [(l, p, u, weight), ...] —— 权重之和逐点复现 hat ∘ T - shift
@@ -367,7 +368,11 @@ def refine_1d(lower, peak, upper, mapping, eps=EPS, shift=0.0):
     if len(xs) < 2 or max(ys) <= eps:
         return []
     # 剪掉"函数在该节点两侧仍共线"的冗余节点: tent 基只需要斜率变化点
-    # (线性段中间放 tent 也能拼出同样的函数, 但会平白多出 tuple)
+    # (线性段中间放 tent 也能拼出同样的函数, 但会平白多出 tuple)。
+    # 例外: 归一化默认点 0 **必须**留作节点 —— OT 引擎对 lower < 0 < upper 的
+    # 区域整条忽略 (supportScalar), 一旦 0 被当成冗余点剪掉, 相邻 tent 就会
+    # 横跨 0, 于是整条 hat 失效 (实测误差 0.625)。0 只在"函数跨 0 线性"时才
+    # 会被剪 (源默认点与合并默认点不重合的场合), 常规情形不多花 tuple。
     if len(xs) > 2:
         keep = [0]
         for i in range(1, len(xs) - 1):
@@ -376,6 +381,10 @@ def refine_1d(lower, peak, upper, mapping, eps=EPS, shift=0.0):
             if abs(s1 - s2) > 1e-9:
                 keep.append(i)
         keep.append(len(xs) - 1)
+        zero_i = min(range(len(xs)), key=lambda i: abs(xs[i]))
+        if abs(xs[zero_i]) < 1e-9 and 0 < zero_i < len(xs) - 1:
+            keep.append(zero_i)
+        keep = sorted(set(keep))
         xs = [xs[i] for i in keep]
         ys = [ys[i] for i in keep]
     tiny = 1e-6
