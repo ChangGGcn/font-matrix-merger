@@ -53,6 +53,11 @@ def _instance(font, position):
 
     跨设计空间合成时, 合并空间的坐标可能含源字体没有的轴 —— 对源字体而言
     那些轴不存在, 直接忽略即可 (等价于"源在该轴上恒定")。
+
+    注意 (实测): `instantiateVariableFont` 的 user limits **不套 avar**
+    (getGlyphSet 会套) —— 同一字体的实例化结果与渲染结果能差 1 单位级。
+    因此采样点只用 min/default/max (avar 的三条不动点), 两条路径在这些点上
+    一致; 合成本身是在**渲染语义** (post-avar) 下逐点等价的。
     """
     if position is None or not is_variable(font):
         return font

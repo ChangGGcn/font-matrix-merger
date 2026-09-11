@@ -220,6 +220,60 @@ def _copy_name_records(src_font, dst_font, name_id):
             dst_font["name"].names.append(copy.deepcopy(rec))
 
 
+def _compose_cff2_base(m, b, base_font, plan):
+    """CFF2 打底: 把轮廓的可变数据 (blend/vsindex) 重参数化后并入。
+
+    b 仍来自"合并默认点实例化" (hmtx/度量/布局静态值都在合并默认点上), 只把
+    CFF2 表换成重参数化后的版本 —— 于是轮廓在合并空间各处都对, 度量变化由
+    HVAR 在字形合并之后并入 (见 _finish_cff2_hvar)。
+    """
+    from ..format.cff2_compose import (is_cff2_variable, merge_cff2_var_stores,
+                                       reparametrize_cff2, reparametrize_hvar,
+                                       cff2_var_store)
+
+    if not (is_cff2_variable(m) and is_cff2_variable(base_font)):
+        return False
+    src_tags = [a.axisTag for a in base_font["fvar"].axes]
+    main_tags = [a.axisTag for a in m["fvar"].axes]
+    dst_tags = list(plan["fvar"])
+    base_var = copy.deepcopy(base_font)
+    rep = reparametrize_cff2(base_var, plan["base_maps"], src_tags, dst_tags)
+    reparametrize_hvar(base_var, plan["base_maps"], src_tags, dst_tags,
+                       folded_default=True)
+    info = merge_cff2_var_stores(m, base_var, plan["main_maps"], main_tags,
+                                 dst_tags)
+    base_hvar = base_var.get("HVAR")
+    plan["cff2"] = {
+        "rep": rep,
+        "offset": info["offset"],
+        "main_changed": info["main_changed"],
+        "hvar_store": (base_hvar.table.VarStore if base_hvar is not None else None),
+        "hvar_map": (dict(base_hvar.table.AdvWidthMap.mapping)
+                     if base_hvar is not None
+                     and getattr(base_hvar.table, "AdvWidthMap", None) is not None
+                     else {}),
+    }
+    b["CFF2"] = base_var["CFF2"]
+    print("  [合成] 打底 CFF2: %d 个 blend 重参数化 (列 %d → %d, VarStore 基址 %d%s)"
+          % (rep["blends"], rep["columns"][0], rep["columns"][1], info["offset"],
+             ", 主 VarStore 已重算" if info["main_changed"] else ""))
+    return True
+
+
+def _finish_cff2_hvar(result, m, plan):
+    """字形合并之后: 打底 HVAR 的变化宽度接入 (AdvWidthMap 按字形名重建)"""
+    info = plan.get("cff2") if plan else None
+    if not info or info.get("hvar_store") is None:
+        return
+    from ..format.cff2_compose import merge_cff2_hvar
+
+    added = set(result.getGlyphOrder()) - set(m.getGlyphOrder())
+    rep = merge_cff2_hvar(result, info["hvar_store"], info["hvar_map"], added)
+    if rep:
+        print("  [合成] 打底 HVAR: %d 个字形接入变化宽度 (VarStore 基址 %d)"
+              % (rep["glyphs"], rep["offset"]))
+
+
 def _transfer_base_layout_once(b, base_font, plan):
     """打底布局变化数据 (GDEF VarStore + GPOS VariationIndex) 并入实例化后的打底。
 
@@ -355,6 +409,7 @@ def _finish_variable_merge(merger, result, m, b, variable_source, plan):
     合成自检失败会向上抛异常, 由 FontMerger._do_merge 回退到旧路径;
     这里返回"实际新增的字形名"列表 (含组件闭包补进来的)。
     """
+    _finish_cff2_hvar(result, m, plan)
     main_names = set(m.getGlyphOrder())
     added_now = [gn for gn in result.getGlyphOrder() if gn not in main_names]
     if plan is not None:
@@ -579,6 +634,8 @@ class FontMerger:
                 b = instance_at_merged_default(variable_source, plan["fvar"])
                 if self.compose_layout:
                     _transfer_base_layout_once(b, variable_source, plan)
+                if self.compose_variations:
+                    _compose_cff2_base(m, b, variable_source, plan)
                 for tag, norm, lo, hi in _collapsing_flats(plan):
                     print(f"  [告警] 合并 avar 的轴 {tag} 把用户区间 "
                           f"[{lo:.0f}, {hi:.0f}] 压成归一化点 {norm:.3f}: "

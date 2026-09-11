@@ -5,6 +5,7 @@
 (经用户空间钳制) 的实例逐点一致 —— 用 fontTools 的 glyphSet(blender) 直接画
 轮廓比对, 不依赖 HarfBuzz。
 """
+import copy
 import os
 import random
 import sys
@@ -163,6 +164,65 @@ def test_cff2_reparametrize_outlines():
           % (checked, rep["columns"][0], rep["columns"][1], worst))
 
 
+def test_cff2_cross_design_space_merge():
+    """CFF2 × CFF2 跨设计空间合并: 打底新字形的轮廓与字宽在各轴位置上都对。
+
+    主/打底 = SourceSerif4 的两个不相交子集, 打底的 fvar 范围与默认值被改过
+    (归一化空间不同) → 走合成路径: 打底 CFF2 的 blend 重参数化并入, 打底
+    HVAR 的变化宽度按字形名重新接上。
+    """
+    main_p = os.path.join(_test_fonts_dir, "otf_variable_fonts",
+                          "SourceSerif4Variable-Roman.otf")
+    from tests.cff2_fixture import cached_cff2_pair
+    pair = cached_cff2_pair(main_p)
+    if not pair:
+        print("  test_cff2_cross_design_space_merge: SKIP (测试字体未就位)")
+        return
+    main_path, base_path = pair
+    from FontMerger import FontMerger
+
+    main, base = TTFont(main_path), TTFont(base_path)
+    merged = FontMerger(verify_compose=False).merge_two(
+        copy.deepcopy(main), copy.deepcopy(base))
+    added = [gn for gn in merged.getGlyphOrder()
+             if gn not in set(main.getGlyphOrder())]
+    assert added, "没有新增字形"
+    axes = {a.axisTag: (a.minValue, a.defaultValue, a.maxValue)
+            for a in merged["fvar"].axes}
+    b_axes = {a.axisTag: (a.minValue, a.defaultValue, a.maxValue)
+              for a in base["fvar"].axes}
+    # 用 glyphSet(location=用户坐标) 比较: 它会应用 avar (与渲染一致);
+    # instantiateVariableFont 的 user limits 不套 avar, 在这类字体上会有
+    # 1 单位级的系统性偏差 (见 core/verify.py 的说明)。
+    worst_o = worst_w = 0.0
+    checked = 0
+    for loc in ({"wght": 700.0, "opsz": 30.0}, {"wght": 200.0, "opsz": 10.0},
+                {"wght": 300.0, "opsz": 14.0}, {"wght": 900.0, "opsz": 48.0}):
+        loc_m = {t: min(max(v, axes[t][0]), axes[t][2]) for t, v in loc.items()}
+        loc_b = {t: min(max(v, b_axes[t][0]), b_axes[t][2])
+                 for t, v in loc.items() if t in b_axes}
+        gs_m = merged.getGlyphSet(location=loc_m)
+        gs_b = base.getGlyphSet(location=loc_b)
+        for gn in added:
+            if gn not in gs_b:
+                continue
+            p1, p2 = RecordingPen(), RecordingPen()
+            gs_m[gn].draw(p1)
+            gs_b[gn].draw(p2)
+            worst_o = max(worst_o, _draw_diff(p1, p2))
+            worst_w = max(worst_w, abs(gs_m[gn].width - gs_b[gn].width))
+            checked += 1
+    assert checked > 0, "没有可比较的字形"
+    # 轮廓容差 0.01 单位: blend 增量在 charstring 里是 16.16 定点数, 重参数化
+    # 后的浮点权重取整留下 1e-3 级残差 (UPM 1000 下即 1e-6 em)。
+    # 字宽容差 4 单位: HVAR 的增量是**整数**, 一个源列拆成多个 hat 后逐个取整,
+    # 非默认位置上的残差可达几个单位 (同样的原因见布局 kerning 的 0.7 单位)。
+    assert worst_o < 0.01, "轮廓偏差 %.4f" % worst_o
+    assert worst_w < 4.0, "字宽偏差 %.4f" % worst_w
+    print("  test_cff2_cross_design_space_merge: %d 字形 × 4 位置, 轮廓 %.2e / "
+          "字宽 %.2e, PASSED" % (checked, worst_o, worst_w))
+
+
 def main():
     print("FontMerger CFF2-composition Test Suite")
     print("=" * 50)
@@ -170,6 +230,7 @@ def main():
         test_cff2_identity,
         test_cff2_vsindex_offset,
         test_cff2_reparametrize_outlines,
+        test_cff2_cross_design_space_merge,
     ]
     passed = 0
     for test in tests:

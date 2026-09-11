@@ -274,11 +274,124 @@ def reparametrize_cff2(font, mappings, src_tags, dst_tags=None, eps=1e-4):
     return report
 
 
+def is_cff2_variable(font):
+    """CFF2 且带可变数据 (VarStore)"""
+    return "CFF2" in font and "fvar" in font and cff2_var_store(font) is not None
+
+
+def merge_cff2_var_stores(main_font, base_font, main_mappings, main_tags,
+                          dst_tags):
+    """把打底 (已重参数化) 的 CFF2 VarStore 并入主字体, 并平移打底的 vsindex。
+
+    主字体的 VarStore 先按合并轴空间重算 (轴数/范围变了就必须算, 否则
+    RegionAxisCount 与 fvar 不一致); 再与打底的 VarData 拼接 (主的在前),
+    打底所有 vsindex 引用加上基址偏移。
+
+    Returns:
+        {"offset": 打底 VarData 基址, "main_changed": bool, "columns": (主, 打底)}
+    """
+    from ..tables.varstore import VarStoreUnion
+
+    main_store = cff2_var_store(main_font)
+    base_store = cff2_var_store(base_font)
+    if main_store is None or base_store is None:
+        return {"offset": 0, "main_changed": False, "columns": (0, 0)}
+    changed = list(main_tags) != list(dst_tags) or any(
+        not m.is_identity() for m in main_mappings.values())
+    if changed:
+        reparametrize_cff2(main_font, main_mappings, main_tags, dst_tags)
+        main_store = cff2_var_store(main_font)
+    elif any(tag not in main_tags for tag in dst_tags):
+        # 只是尾部新增轴: 直接给每个 region 追加恒定轴 (省一次全量 blend 重写)
+        from .vf_axes import _extend_region_list
+
+        _extend_region_list(main_store.VarRegionList,
+                            len(dst_tags) - len(main_tags))
+    union = VarStoreUnion()
+    union.add(main_store)
+    offset = union.add(base_store)
+    merged_store = union.build()
+    set_cff2_var_store(main_font, merged_store)
+    # 打底字体自己也换成同一个并集 store —— 它的 vsindex 已经平移到 offset,
+    # 若仍留着只有 1 个 VarData 的老 store, 任何"就地求值"的代码 (子集化里的
+    # remove_unused_subroutines、绘制) 都会 IndexError。
+    set_cff2_var_store(base_font, copy.deepcopy(merged_store))
+    offset_cff2_vsindex(base_font, offset)
+    return {"offset": offset, "main_changed": changed,
+            "columns": (sum(len(vd.VarRegionIndex) for vd in main_store.VarData),
+                        sum(len(vd.VarRegionIndex) for vd in base_store.VarData))}
+
+
+def reparametrize_hvar(font, mappings, src_tags, dst_tags, folded_default):
+    """把字体自己的 HVAR ItemVariationStore 重参数化 (VarIdxMap 的 (outer,行)
+    引用保持 → 只需换 region/列, 引用不用动)"""
+    from .variation_compose import reparametrize_var_store
+
+    if "HVAR" not in font:
+        return None
+    table = font["HVAR"].table
+    store = getattr(table, "VarStore", None)
+    if store is None:
+        return None
+    new_store, report = reparametrize_var_store(store, mappings, src_tags,
+                                                dst_tags,
+                                                folded_default=folded_default)
+    table.VarStore = new_store
+    return report
+
+
+def merge_cff2_hvar(result, base_store, base_map, added_names):
+    """把打底的 HVAR 变化并入合并结果 (AdvWidthMap 按字形名重建)。
+
+    打底的 hmtx 静态值已由"合并默认点实例化"折好, 所以传进来的 base_store 应是
+    folded_default=True 的重参数化结果 (只保留默认点之外的变化量)。
+
+    VarIdxMap.preWrite 会对**每个**字形取 mapping[g], 所以这里必须为结果字体的
+    全部字形给出一项 (缺省 NO_VARIATION_INDEX); 只有真正来自打底的字形才用打底
+    的映射 (同名冲突时结果里是主字体的字形)。
+    """
+    from ..tables.varstore import VarStoreUnion
+
+    if "HVAR" not in result or base_store is None:
+        return None
+    hvar = result["HVAR"].table
+    union = VarStoreUnion()
+    union.add(getattr(hvar, "VarStore", None))
+    offset = union.add(base_store)
+    hvar.VarStore = union.build()
+    current = dict(getattr(hvar.AdvWidthMap, "mapping", {}) or {})
+    added = set(added_names)
+    mapping = {}
+    n_added = 0
+    for gn in result.getGlyphOrder():
+        varidx = None
+        if gn in added:
+            varidx = base_map.get(gn)
+            if varidx is not None and varidx != 0xFFFFFFFF:
+                varidx = (((varidx >> 16) + offset) << 16) | (varidx & 0xFFFF)
+                n_added += 1
+            else:
+                varidx = None
+        if varidx is None:
+            varidx = current.get(gn, 0xFFFFFFFF)
+        mapping[gn] = varidx
+    new_map = ot.VarIdxMap()
+    new_map.mapping = mapping
+    hvar.AdvWidthMap = new_map
+    return {"offset": offset, "glyphs": n_added}
+
+
 def offset_cff2_vsindex(font, delta):
     """把 CFF2 里的 vsindex 引用整体偏移 delta (并入别的字体前用)。
 
     没有显式 vsindex 却含 blend 的程序会**补一条** `vsindex` —— 否则它默认取
     Private DICT 的 vsindex (合并后属于主字体, 语义已不同)。
+
+    Private DICT 自己的 blend 值 (hint 数据) 没有显式 vsindex 可写: fontTools 的
+    CFF2 instancer 假定"Private 没有 vsindex 键" (varLib/cff.py 的注释),
+    并且它读 `private.vsindex` 时按列表处理 (instancer 的 values[0])。
+    因此这里把 Private 的 blend 值**折成默认值** (丢掉 hint 的变化) —— 与
+    "丢 hint 可行"的既定取舍一致, 也避开这个坑。
     """
     if not delta:
         return 0
@@ -301,13 +414,21 @@ def offset_cff2_vsindex(font, delta):
             base = getattr(pd, "vsindex", 0) if pd is not None else 0
             obj.setProgram([base + delta, "vsindex"] + list(program))
             patched += 1
+    arg_types = _private_arg_types()
     for pd in _private_dicts(td):
         raw = getattr(pd, "rawDict", None)
         if not raw:
             continue
-        v = raw.get("vsindex", 0)
-        if isinstance(v, list):
-            v = v[0]
-        raw["vsindex"] = v + delta
+        for name, value in list(raw.items()):
+            if not isinstance(value, list) or not value:
+                continue
+            arg_type = arg_types.get(name)
+            if arg_type == "delta" and isinstance(value[0], list):
+                raw[name] = [entry[0] for entry in value]     # 折成默认值
+                pd.__dict__.pop(name, None)
+            elif arg_type == "number" and not isinstance(value[0], list):
+                raw[name] = value[0]
+                pd.__dict__.pop(name, None)
+        raw.pop("vsindex", None)          # 不能给 Private 写 vsindex (见 docstring)
         pd.__dict__.pop("vsindex", None)
     return patched
