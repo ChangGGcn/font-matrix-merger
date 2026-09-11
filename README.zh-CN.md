@@ -46,7 +46,7 @@ FontMerger/
 | **多级打底** | 主字体 + 1~n 级打底依次合并；每级可独立缩放/基线偏移 |
 | **格式互转** | CFF↔glyf（三次曲线↔二次曲线），CFF2→CFF（官方 `_convertCFF2ToCFF`）、CFF→CFF2 |
 | **CID 合并** | 双 CID：CID 偏移 + CharString 物化直接复制；CID↔name-keyed 转换（含 cmap format 14 UVS） |
-| **可变字体** | 主 VF 输出保持可变（CFF2/HVAR/STAT/fvar 完整保留并补全） |
+| **可变字体** | 主 VF 输出保持可变（CFF2/HVAR/STAT/fvar 完整保留并补全）；主/打底轴空间与 `avar` 一致时，打底字形的 `gvar` 增量一并保留（HVAR 由幽灵点重建） |
 | **Axis 并集** | 主/打底轴空间取并集；varStore（含 GDEF/HVAR/MVAR）恒定轴 Region 扩展 |
 | **OpenType 特性合并** | 打底 GSUB/GPOS/GDEF 用 Subsetter 闭包修剪后追加；同 tag feature **并成一条记录**，打底 Script/LangSys 一并并入（追加的 feature 才可达），FeatureList 重排后重写 `FeatureVariations` 索引，GDEF 字类/VarStore/MarkGlyphSets 取并集并重映射 `LookupFlag` bit4 的 `MarkFilteringSet` |
 | **缩放 + 基线偏移** | Pen 管线重建轮廓（T2CharStringPen/TTGlyphPen + TransformPen），度量同步 |
@@ -233,7 +233,7 @@ merged = merge_subsets(paths, out_path="Merged.ttf", tag="ja", verify=True)
 ## 已知限制
 
 1. **JP（CID CFF2）作主字体**（矩阵 C1/D1）：合并本身成功（约 18,600~18,868 字形），但保存阶段打底拉丁字形在 cmap format 4 的引用偶发不完整；矩阵生成器降级走静态实例化路径。如需真·可变输出，需攻克 CFF2 CID 注入的更深层命名空间问题
-2. **Master 级插值合成**（打底字形随打底轴变动）：尚未实现——打底字形按打底默认实例并入，在主 VF 各轴上恒定
+2. **跨设计空间的字形增量**：主/打底同为可变且**轴空间与 `avar` 完全一致**时（`axes_compatible()` 判定），打底字形的 `gvar` 增量会搬到合并结果，并用幽灵点重建 `HVAR`，新增字形随轴变化；轴空间不一致（轴集合/范围或 avar 不同）时，打底字形仍按默认实例并入、在各轴上恒定——两个不同设计空间的合成属于 `fontTools.varLib.merger`/`varLib.build` 的领域，本项目有意不做
 3. **OpenType 特性**：追加的打底 feature 所引用字形必须存在于主字体（否则跳过该 lookup）。同 tag feature 并成一条记录；打底 Script/LangSys 一并并入（否则追加的 feature 不可达）；FeatureList 重排后重写 `FeatureVariations` 的 FeatureIndex（表本身保留，无法映射的记录才会被丢）；GDEF `GlyphClassDef`/`MarkAttachClassDef`/`MarkGlyphSetsDef` 与 `ItemVariationStore` 均取并集，并重映射 `LookupFlag` bit4 的 `MarkFilteringSet`。异源路径不并入**打底字体自己的** `FeatureVariations`（只保留主字体的）
 4. **VORG**：默认轴位置实例化时数值正确；非默认位置需额外重算
 5. **多级 OT 特性**：上级已并入的 feature 会在下级被重复检测（幂等，但 lookup 可能冗余）

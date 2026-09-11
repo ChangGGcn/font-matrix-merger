@@ -85,6 +85,69 @@ def check_compatibility(main_font, base_font):
     return (len([w for w in warnings if "合并后新增字形可能为0" in w]) == 0, warnings)
 
 
+def axes_compatible(main_font, base_font):
+    """两个字体的轴空间与 avar 映射是否完全一致。
+
+    逐字形增量 (gvar 的 tuple 峰值坐标) 是**归一化坐标**; 只有当两边的
+    fvar 轴 (顺序/tag/上下限/默认值) 与 avar 映射都一样时, 打底的增量才能
+    原样搬到主字体上。轴空间不一致就该先在设计空间层面做合成
+    (fontTools.varLib.merger / varLib.build 的领域), 不属于这里。
+    """
+    if not (is_variable(main_font) and is_variable(base_font)):
+        return False
+    if "glyf" not in main_font or "glyf" not in base_font:
+        return False
+    ma = [(a.axisTag, a.minValue, a.defaultValue, a.maxValue)
+          for a in main_font["fvar"].axes]
+    ba = [(a.axisTag, a.minValue, a.defaultValue, a.maxValue)
+          for a in base_font["fvar"].axes]
+    if ma != ba:
+        return False
+
+    def avar_key(font):
+        if "avar" not in font:
+            return None
+        segments = getattr(font["avar"], "segments", None)
+        if not segments:
+            return None
+        return tuple(sorted((tag, tuple(sorted(pts.items())))
+                            for tag, pts in segments.items()))
+
+    return avar_key(main_font) == avar_key(base_font)
+
+
+def transfer_glyph_variations(result, base_var, glyph_names):
+    """把打底 VF 的逐字形 gvar 增量搬进合并结果。
+
+    调用前必须确认 :func:`axes_compatible` (轴空间/avar 一致), 否则峰值
+    坐标含义不同。搬运后 HVAR 需要重建 —— 用 fontTools 官方的
+    varLib.hvar.add_HVAR() 从 gvar 幽灵点重算, 这样新增字形的字宽也随轴变化,
+    而不是停在默认实例的值。
+
+    Returns:
+        实际搬运增量的字形数
+    """
+    if "gvar" not in result or "gvar" not in getattr(base_var, "keys", lambda: [])():
+        return 0
+    n_axes = len(result["fvar"].axes)
+    moved = 0
+    for gn in glyph_names:
+        variations = base_var["gvar"].variations.get(gn)
+        if not variations:
+            continue
+        if any(len(tv.axes) != n_axes for tv in variations):
+            continue        # 轴数不符: 放弃该字形, 保持默认实例
+        result["gvar"].variations[gn] = copy.deepcopy(variations)
+        moved += 1
+    if moved:
+        try:
+            from fontTools.varLib.hvar import add_HVAR
+            add_HVAR(result)
+        except Exception as e:
+            print(f"  [增量] HVAR 重建失败 ({e}), 新增字形的字宽可能不随轴变化")
+    return moved
+
+
 def _remove_ros(font):
     """从 CFF 字体移除 ROS/FDSelect/FDArray, 转回 name-keyed"""
     if "CFF " not in font:
@@ -214,8 +277,18 @@ class FontMerger:
             if not bs and not bt:   return self._vTTF_vOTF(m, b)
             if not bs and bt:       return self._vTTF_vTTF(m, b)
 
-    def _do_merge(self, m, b):
+    def _do_merge(self, m, b, variable_source=None):
+        """合并一级。
+
+        Args:
+            m: 主字体
+            b: 打底字体 (可变打底已实例化为静态)
+            variable_source: 打底**实例化之前**的可变字体; 轴空间一致时
+                用它把逐字形 gvar 增量搬回来 (否则打底字形停在默认实例)
+        """
         # ── 预处理 ──
+        if variable_source is not None and not axes_compatible(m, variable_source):
+            variable_source = None
         b = _normalize_upm(m, b)
 
         from ..format.cid_convert import _is_cid_font, ensure_cid_format, cid_to_name
@@ -308,11 +381,21 @@ class FontMerger:
 
         CHUNK_SIZE = 5000
         if len(to_add) > CHUNK_SIZE:
-            return self._chunked_merge(m, b, to_add, CHUNK_SIZE)
+            return self._chunked_merge(m, b, to_add, CHUNK_SIZE,
+                                       variable_source)
 
         try:
             result = merge_glyphs_via_ttx(m, b, to_add)
             print(f"  合并后字形: {len(result.getGlyphOrder())}")
+            if variable_source is not None:
+                # 注意: 实际新增的除 to_add 外还有"组件闭包"补进来的字形
+                main_names = set(m.getGlyphOrder())
+                added_now = [gn for gn in result.getGlyphOrder()
+                             if gn not in main_names]
+                moved = transfer_glyph_variations(result, variable_source,
+                                                  added_now)
+                if moved:
+                    print(f"  [增量] {moved} 个新增字形保留轴变化 (gvar 增量搬运)")
             # 合并打底 OT 特性 (修剪到仅与保留字形相关, 冲突以主为准)
             _merge_base_layout_once(result, b, to_add)
             return result
@@ -320,7 +403,7 @@ class FontMerger:
             print(f"  [合并失败] {e}")
             return copy.deepcopy(m)
 
-    def _chunked_merge(self, m, b, to_add, chunk_size):
+    def _chunked_merge(self, m, b, to_add, chunk_size, variable_source=None):
         """分块合并: 将打底字体按 chunk_size 拆分, 逐块合并到主字体"""
         chunks = [to_add[i:i+chunk_size] for i in range(0, len(to_add), chunk_size)]
         print(f"  [分块] {len(chunks)} 块, 每块 ≤{chunk_size} 字形")
@@ -333,6 +416,13 @@ class FontMerger:
             except Exception as e:
                 print(f"失败: {e}")
                 return current if len(current.getGlyphOrder()) > len(m.getGlyphOrder()) else copy.deepcopy(m)
+        if variable_source is not None:
+            main_names = set(m.getGlyphOrder())
+            added_now = [gn for gn in current.getGlyphOrder()
+                         if gn not in main_names]
+            moved = transfer_glyph_variations(current, variable_source, added_now)
+            if moved:
+                print(f"  [增量] {moved} 个新增字形保留轴变化 (gvar 增量搬运)")
         # 分块完成后统一合并打底 OT 特性一次
         _merge_base_layout_once(current, b, to_add)
         return current
@@ -378,20 +468,30 @@ class FontMerger:
         return self._do_merge(m, b)
 
     # ---- 可变+可变 ----
+    # 打底是 glyf 可变字体时, 实例化前先留一份: 轴空间一致则把逐字形 gvar
+    # 增量搬进合并结果 (否则新增字形会停在默认实例, 丢失轴变化)
+    @staticmethod
+    def _var_source(b):
+        return b if (is_variable(b) and "glyf" in b) else None
+
     def _vOTF_vOTF(self, m, b):
+        src = self._var_source(b)
         m = self._axis_union(m, b)
-        return self._do_merge(m, variable_to_static(b))
+        return self._do_merge(m, variable_to_static(b), src)
     def _vOTF_vTTF(self, m, b):
         self.ask("vOTF_vTTF", "OTF/TTF？", ["OTF", "TTF"])
+        src = self._var_source(b)
         m = self._axis_union(m, b)
-        return self._do_merge(m, variable_to_static(b))
+        return self._do_merge(m, variable_to_static(b), src)
     def _vTTF_vOTF(self, m, b):
         self.ask("vTTF_vOTF", "TTF/OTF？", ["TTF", "OTF"])
+        src = self._var_source(b)
         m = self._axis_union(m, b)
-        return self._do_merge(m, variable_to_static(b))
+        return self._do_merge(m, variable_to_static(b), src)
     def _vTTF_vTTF(self, m, b):
+        src = self._var_source(b)
         m = self._axis_union(m, b)
-        return self._do_merge(m, variable_to_static(b))
+        return self._do_merge(m, variable_to_static(b), src)
 
     @staticmethod
     def _axis_union(m, b):

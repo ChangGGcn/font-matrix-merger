@@ -46,7 +46,7 @@ FontMerger/
 | **Multi-level chaining** | Main + 1..n base fonts; each level can have its own scale & baseline offset |
 | **Format conversion** | CFF↔glyf (cubic↔quadratic), CFF2→CFF (`_convertCFF2ToCFF`), CFF→CFF2 |
 | **CID merging** | Dual-CID: CID offset + direct CharString copy; CID↔name-keyed conversion (incl. cmap format 14 UVS) |
-| **Variable fonts** | Main VF preserved in output (CFF2/HVAR/STAT/fvar kept & extended) |
+| **Variable fonts** | Main VF preserved in output (CFF2/HVAR/STAT/fvar kept & extended); base VF glyphs keep their `gvar` deltas (HVAR rebuilt from phantom points) when both fonts share the same axis space and `avar` |
 | **Axis union** | Union of main/base axis spaces; varStore (incl. GDEF/HVAR/MVAR) constant-axis region extension |
 | **OpenType feature merging** | Base GSUB/GPOS/GDEF pruned via Subsetter closure, then appended; same-tag features are **unioned** into one record, base scripts/lang-systems are merged so the appended features stay reachable, `FeatureVariations` feature indices are rewritten after the re-sort, GDEF classes/VarStore/MarkGlyphSets take the union (+ `LookupFlag` bit4 `MarkFilteringSet` remap) |
 | **Scale + baseline offset** | Pen-pipeline outline rebuild (T2CharStringPen/TTGlyphPen + TransformPen) with synced metrics |
@@ -235,7 +235,7 @@ merged = merge_subsets(paths, out_path="Merged.ttf", tag="ja", verify=True)
 ## Known Limitations
 
 1. **JP (CID CFF2) as the main font** (matrix cells C1/D1): the merge itself succeeds (~18,600–18,868 glyphs), but the save stage can leave incomplete cmap format-4 references for base Latin glyphs; the matrix generator falls back to a static-instanced path. A true variable output requires solving deeper CFF2 CID namespace issues.
-2. **Master-level interpolation composition** (base glyphs varying along the base font’s axes) is not implemented: base glyphs are merged at the base’s default instance and are constant across the main VF’s axes.
+2. **Base-glyph variation across design spaces**: when main and base are both variable **and share the same axis space and `avar`**, the base glyphs' `gvar` deltas are transferred to the merged font and `HVAR` is rebuilt from the phantom points, so they keep animating along the axes (`axes_compatible()` gates this). When the design spaces differ (different axis sets/ranges or a different `avar`), base glyphs are still merged at the base's default instance and stay constant; composing two different design spaces is the domain of `fontTools.varLib.merger`/`varLib.build` and is intentionally not attempted here.
 3. **OpenType features**: appended base features are merged only if all referenced glyphs exist in the main font (otherwise the lookup is skipped). Same-tag features are unioned into one record, base scripts/lang-systems are merged so the appended features stay reachable, `FeatureVariations` feature indices are rewritten after the re-sort (the table itself is preserved; records whose index cannot be mapped are dropped), and GDEF `GlyphClassDef`/`MarkAttachClassDef`/`MarkGlyphSetsDef` plus the `ItemVariationStore` take the union with `LookupFlag` bit4 `MarkFilteringSet` indices remapped. Base-font `FeatureVariations` are not merged in the heterogeneous path (only the main font's are preserved).
 4. **VORG**: values are correct when instancing at the default axis position; non-default positions need recomputation.
 5. **Multi-level OT features**: a feature already merged at an earlier level is re-detected at later levels (idempotent, but lookups may become redundant).

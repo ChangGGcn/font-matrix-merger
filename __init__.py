@@ -21,7 +21,7 @@
 
 __version__ = "0.1.0-alpha1"
 
-from .core.merger import FontMerger
+from .core.merger import FontMerger, axes_compatible, transfer_glyph_variations
 from .core.conflict import resolve_conflicts, plan_alias
 from .core.naming import apply_naming
 from .core.glyph_copy import merge_glyphs_via_ttx

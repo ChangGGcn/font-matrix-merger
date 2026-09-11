@@ -439,6 +439,60 @@ def test_generic_merge_preserves_mark_sets_and_fv():
           % len(again.getGlyphOrder()))
 
 
+def test_generic_merge_transfers_variation():
+    """轴空间一致的可变打底: 新增字形保留 gvar 增量 (不再停在默认实例)。
+
+    判据: 非默认轴位置上, 新增字形的轮廓与字宽必须与打底源字体一致 ——
+    这同时验证了 gvar 增量搬运与 HVAR 重建 (add_HVAR 由幽灵点重算)。
+    """
+    vf = _open_vf()
+    if not vf:
+        print("  test_generic_merge_transfers_variation: SKIP (测试字体未就位)")
+        return
+    paths = _vf_subsets(n=2)
+    if not paths:
+        print("  test_generic_merge_transfers_variation: SKIP (无法构造夹具)")
+        return
+
+    main, sub = TTFont(vf), TTFont(paths[0])
+    assert axes_compatible(main, sub), "夹具轴空间不一致"
+    merger = FontMerger()
+    merger.mem = {"vTTF_vTTF": "TTF"}
+    result = merger.merge_two(copy.deepcopy(main), copy.deepcopy(sub))
+
+    main_names = set(main.getGlyphOrder())
+    added = [gn for gn in result.getGlyphOrder() if gn not in main_names]
+    assert added, "没有新增字形, 用例无效"
+    with_deltas = sum(1 for gn in added if result["gvar"].variations.get(gn))
+    assert with_deltas > len(added) * 0.9, \
+        "只有 %d/%d 个新增字形保留增量" % (with_deltas, len(added))
+
+    from fontTools.pens.recordingPen import RecordingPen
+    from fontTools.varLib.instancer import instantiateVariableFont
+    axis = result["fvar"].axes[0].axisTag
+    top = result["fvar"].axes[0].maxValue
+    r_top = instantiateVariableFont(result, {axis: top}, inplace=False)
+    b_top = instantiateVariableFont(sub, {axis: top}, inplace=False)
+    rs, bs = r_top.getGlyphSet(), b_top.getGlyphSet()
+    checked = diffs = hmtx_diffs = 0
+    for gn in added[:300]:
+        if gn not in bs:
+            continue
+        checked += 1
+        p1, p2 = RecordingPen(), RecordingPen()
+        rs[gn].draw(p1)
+        bs[gn].draw(p2)
+        if p1.value != p2.value:
+            diffs += 1
+        if r_top["hmtx"][gn] != b_top["hmtx"][gn]:
+            hmtx_diffs += 1
+    assert checked, "没有可比较的字形"
+    assert not diffs, "非默认轴位置轮廓不一致 %d/%d" % (diffs, checked)
+    assert not hmtx_diffs, "非默认轴位置度量不一致 %d/%d" % (hmtx_diffs, checked)
+    print("  test_generic_merge_transfers_variation: %d 字形带增量, 比对 %d, PASSED"
+          % (with_deltas, checked))
+
+
 def main():
     print("FontMerger Test Suite")
     print("=" * 50)
@@ -451,6 +505,7 @@ def main():
         test_variable_to_static_fidelity, test_generic_feature_union,
         test_no_dangling_layout_refs, test_variable_to_static_cff2,
         test_generic_merge_preserves_mark_sets_and_fv,
+        test_generic_merge_transfers_variation,
     ]
 
     passed = 0
