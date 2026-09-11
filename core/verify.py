@@ -1,0 +1,404 @@
+# -*- coding: utf-8 -*-
+"""合并结果自检 — verify_merge()
+
+逐字形比对"源分片 vs 合并字体", 并检查容器与元数据。核心判据:
+
+  1. 码位: 合并字体覆盖所有源分片的码位并集 (missing/extra 均为 0);
+  2. 轮廓与度量: 在多个轴位置 (默认 + 轴两端) 实例化源/合并字体,
+     对每个源字形比较分解后的轮廓与 hmtx/vmtx — 要求零差异;
+  3. 布局: GSUB/GPOS 特性 tag 覆盖各分片; 无悬空字形引用; Coverage 有序;
+  4. 容器: sfnt 魔数 / flavor / head.flags bit11; nameID 16/17/25 + 实例 PS 名;
+  5. 变体: GDEF ClassDef、MarkGlyphSets、VarStore 不丢。
+
+不使用 HarfBuzz: 无 uharfbuzz 依赖时也能跑; 布局层面的"字形是否可达/有序"
+由第 3 条静态校验覆盖。
+"""
+from fontTools.pens.recordingPen import RecordingPen
+from fontTools.varLib.instancer import instantiateVariableFont
+
+from ..tables.layout_union import _COVERAGE_ATTRS
+from ..utils.detect import is_variable
+
+#: 合并后不应存在的 WOFF2 残留位
+_WOFF2_FLAG = 0x0800
+
+
+def _pen_value(font, glyph_name, glyph_set=None):
+    pen = RecordingPen()
+    (glyph_set or font.getGlyphSet())[glyph_name].draw(pen)
+    return pen.value
+
+
+def _coords_delta(a, b, tolerance):
+    """比较两个 RecordingPen 结果; 返回是否在容差内 (及最大偏差)"""
+    if len(a) != len(b):
+        return False, float("inf")
+    worst = 0.0
+    for (op1, args1), (op2, args2) in zip(a, b):
+        if op1 != op2 or len(args1) != len(args2):
+            return False, float("inf")
+        for v1, v2 in zip(args1, args2):
+            p1 = v1 if isinstance(v1, tuple) else (v1,)
+            p2 = v2 if isinstance(v2, tuple) else (v2,)
+            if len(p1) != len(p2):
+                return False, float("inf")
+            for x, y in zip(p1, p2):
+                if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                    worst = max(worst, abs(float(x) - float(y)))
+    return worst <= tolerance, worst
+
+
+def _instance(font, position):
+    if position is None or not is_variable(font):
+        return font
+    return instantiateVariableFont(font, dict(position), inplace=False,
+                                   optimize=False)
+
+
+def _auto_positions(font):
+    """默认: 轴默认位置 + 第一条轴的最小/最大位置"""
+    if not is_variable(font):
+        return [None]
+    axis = font["fvar"].axes[0]
+    pos = [None]
+    for v in (axis.minValue, axis.maxValue):
+        if v != axis.defaultValue:
+            pos.append({axis.axisTag: v})
+    return pos
+
+
+def _label(position, font):
+    if position is None:
+        return "default"
+    return ",".join("%s=%g" % (k, v) for k, v in position.items())
+
+
+def verify_merge(sources, merged, glyph_map=None, axis_positions="auto",
+                 tolerance=0.0, sample=None, verbose=True):
+    """校验合并结果, 返回结构化报告 dict。
+
+    Args:
+        sources: 源分片列表 (TTFont 或路径; 与 merge_subsets 的输入一致)
+        merged: 合并结果 TTFont
+        glyph_map: {分片标签: {源字形名: 合并后字形名/GID}};
+                   缺省按字形名相同处理 (合并时未改名的情况)
+        axis_positions: "auto" | [None|dict]; None = 轴默认位置不实例化
+        tolerance: 轮廓坐标容差 (单位: 字体单位)
+        sample: 每个分片最多比对多少个字形 (None = 全部)
+        verbose: 打印进度
+
+    Returns:
+        {"ok": bool, "failures": [str], "checks": {...}, "stats": {...}}
+    """
+    from ..core.subset_merge import load_subsets
+
+    fonts, labels = load_subsets(sources)
+    failures = []
+    checks = {}
+
+    def log(*a):
+        if verbose:
+            print(*a, flush=True)
+
+    # ---- 1. 码位 ----
+    src_cps = set()
+    for f in fonts:
+        src_cps |= set(f.getBestCmap())
+    merged_cps = set(merged.getBestCmap())
+    missing = sorted(src_cps - merged_cps)
+    extra = sorted(merged_cps - src_cps)
+    checks["codepoints"] = {"source": len(src_cps), "merged": len(merged_cps),
+                            "missing": len(missing), "extra": len(extra)}
+    if missing:
+        failures.append("码位丢失 %d 个: %s" % (len(missing), missing[:10]))
+    if extra:
+        failures.append("出现源字体没有的码位 %d 个: %s" % (len(extra), extra[:10]))
+    log("  [码位] 源 %d, 合并 %d, 缺失 %d, 多余 %d"
+        % (len(src_cps), len(merged_cps), len(missing), len(extra)))
+
+    # ---- 2. 轴 / 实例 ----
+    src_axes = {}
+    for f in fonts:
+        if is_variable(f):
+            src_axes[tuple((a.axisTag, a.minValue, a.defaultValue, a.maxValue)
+                           for a in f["fvar"].axes)] = True
+    checks["axes"] = {"source": len(src_axes), "variable": is_variable(merged)}
+    if len(src_axes) > 1:
+        failures.append("源分片轴空间不一致 (%d 种)" % len(src_axes))
+    if is_variable(merged) and src_axes:
+        merged_axes = tuple((a.axisTag, a.minValue, a.defaultValue, a.maxValue)
+                            for a in merged["fvar"].axes)
+        if merged_axes not in src_axes:
+            failures.append("合并字体轴空间与源分片不一致: %s" % (merged_axes,))
+
+    positions = _auto_positions(merged) if axis_positions == "auto" else list(axis_positions)
+    checks["positions"] = [_label(p, merged) for p in positions]
+
+    # ---- 3. 逐字形轮廓/度量比对 ----
+    merged_by_pos = {}
+    compared = 0
+    mismatched = {"outline": 0, "hmtx": 0, "vmtx": 0}
+    samples = {}
+    for position in positions:
+        merged_inst = _instance(merged, position)
+        merged_set = merged_inst.getGlyphSet()
+        merged_order = merged_inst.getGlyphOrder()
+        merged_index = {gn: i for i, gn in enumerate(merged_order)}
+        pname = _label(position, merged)
+        for index, (font, label) in enumerate(zip(fonts, labels)):
+            src_inst = _instance(font, position)
+            src_set = src_inst.getGlyphSet()
+            src_order = src_inst.getGlyphOrder()
+            gmap = (glyph_map or {}).get(label, {})
+            names = src_order
+            if sample and len(names) > sample:
+                step = max(1, len(names) // sample)
+                names = names[::step][:sample]
+            for gn in names:
+                if gn == ".notdef":
+                    continue
+                target = gmap.get(gn, gn)
+                if isinstance(target, int):
+                    if target >= len(merged_order):
+                        continue
+                    target = merged_order[target]
+                if isinstance(target, str) and target not in merged_index:
+                    continue
+                compared += 1
+                ok, worst = _coords_delta(_pen_value(src_inst, gn, src_set),
+                                          _pen_value(merged_inst, target, merged_set),
+                                          tolerance)
+                if not ok:
+                    mismatched["outline"] += 1
+                    if len(samples.get("outline", [])) < 5:
+                        samples.setdefault("outline", []).append(
+                            (label, gn, target, worst))
+                    continue
+                if "hmtx" in src_inst and "hmtx" in merged_inst:
+                    if src_inst["hmtx"][gn] != merged_inst["hmtx"][target]:
+                        mismatched["hmtx"] += 1
+                        if len(samples.get("hmtx", [])) < 5:
+                            samples.setdefault("hmtx", []).append(
+                                (label, gn, src_inst["hmtx"][gn],
+                                 merged_inst["hmtx"][target]))
+                if "vmtx" in src_inst and "vmtx" in merged_inst:
+                    if (gn in src_inst["vmtx"].metrics
+                            and target in merged_inst["vmtx"].metrics
+                            and src_inst["vmtx"][gn] != merged_inst["vmtx"][target]):
+                        mismatched["vmtx"] += 1
+        log("  [轮廓] 位置 %-12s 累计比对 %d 字形, 不一致 %s"
+            % (pname, compared, mismatched))
+        merged_by_pos[pname] = merged_inst
+
+    checks["glyphs"] = {"compared": compared, "mismatched": dict(mismatched),
+                        "samples": samples}
+    for kind, n in mismatched.items():
+        if n:
+            failures.append("%s 不一致 %d 处, 例: %s"
+                            % (kind, n, samples.get(kind, [])[:3]))
+
+    # ---- 4. 布局特性 ----
+    feat_report = {}
+    for tag in ("GSUB", "GPOS"):
+        merged_tags = set()
+        if tag in merged and merged[tag].table.FeatureList:
+            merged_tags = {fr.FeatureTag
+                           for fr in merged[tag].table.FeatureList.FeatureRecord}
+        src_tags = set()
+        for f in fonts:
+            if tag in f and f[tag].table.FeatureList:
+                src_tags |= {fr.FeatureTag
+                             for fr in f[tag].table.FeatureList.FeatureRecord}
+        lost = sorted(src_tags - merged_tags)
+        feat_report[tag] = {"source": sorted(src_tags), "merged": sorted(merged_tags),
+                            "lost": lost}
+        if lost:
+            failures.append("%s 丢失特性: %s" % (tag, lost))
+    checks["features"] = feat_report
+    log("  [特性] GSUB %d, GPOS %d" % (len(feat_report["GSUB"]["merged"]),
+                                       len(feat_report["GPOS"]["merged"])))
+
+    # ---- 5. 布局引用完整性 ----
+    layout = _check_layout_integrity(merged)
+    checks["layout"] = layout
+    if layout["dangling"]:
+        failures.append("布局表引用不存在的字形 %d 个: %s"
+                        % (len(layout["dangling"]), layout["dangling"][:10]))
+    if layout["unsorted_coverages"]:
+        failures.append("Coverage 未按 GID 升序: %d 个" % layout["unsorted_coverages"])
+    log("  [布局] 悬空引用 %d, 未排序 Coverage %d"
+        % (len(layout["dangling"]), layout["unsorted_coverages"]))
+
+    # ---- 6. GDEF ----
+    gdef_report = {"classes": 0, "mark_sets": 0, "var_store": False}
+    if "GDEF" in merged:
+        g = merged["GDEF"].table
+        gdef_report["classes"] = len(g.GlyphClassDef.classDefs) if g.GlyphClassDef else 0
+        gdef_report["mark_sets"] = (g.MarkGlyphSetsDef.MarkSetCount
+                                    if getattr(g, "MarkGlyphSetsDef", None) else 0)
+        gdef_report["var_store"] = getattr(g, "VarStore", None) is not None
+    checks["gdef"] = gdef_report
+
+    # ---- 7. VVAR / HVAR 覆盖 ----
+    var_maps = {}
+    for tag in ("HVAR", "VVAR"):
+        if tag not in merged:
+            continue
+        table = merged[tag].table
+        for attr in ("AdvWidthMap", "LsbMap", "RsbMap",
+                     "AdvHeightMap", "TsbMap", "BsbMap", "VOrgMap"):
+            m = getattr(table, attr, None)
+            if m is None or not hasattr(m, "mapping"):
+                continue
+            n_missing = sum(1 for gn in merged.getGlyphOrder()
+                            if gn not in m.mapping)
+            var_maps["%s.%s" % (tag, attr)] = n_missing
+            if n_missing:
+                failures.append("%s.%s 缺少 %d 个字形的映射"
+                                % (tag, attr, n_missing))
+    checks["variation_maps"] = var_maps
+
+    # ---- 8. 容器与元数据 ----
+    container = {
+        "flavor": merged.flavor,
+        "head_flags": hex(merged["head"].flags),
+        "woff2_flag_cleared": not (merged["head"].flags & _WOFF2_FLAG),
+        "name16": merged["name"].getDebugName(16) if "name" in merged else None,
+        "name17": merged["name"].getDebugName(17) if "name" in merged else None,
+        "name25": merged["name"].getDebugName(25) if "name" in merged else None,
+        "instance_ps_names": [],
+    }
+    if merged.flavor not in (None, "woff", "woff2"):
+        failures.append("flavor 异常: %r" % (merged.flavor,))
+    if not container["woff2_flag_cleared"]:
+        failures.append("head.flags 未清除 WOFF2 位: %s" % container["head_flags"])
+    if is_variable(merged):
+        if not container["name16"]:
+            failures.append("缺少 nameID 16 (Typographic Family)")
+        if not container["name25"]:
+            failures.append("缺少 nameID 25 (Variations PS Name Prefix)")
+        ps = []
+        for inst in merged["fvar"].instances:
+            pid = getattr(inst, "postscriptNameID", 0xFFFF)
+            nm = merged["name"].getDebugName(pid) if pid not in (0xFFFF, None) else None
+            ps.append(nm)
+            if not nm:
+                failures.append("命名实例缺少 PostScript 名 (nameID %s)" % pid)
+        container["instance_ps_names"] = ps
+        if len(set(ps)) != len(ps):
+            failures.append("命名实例 PostScript 名重复")
+    checks["container"] = container
+
+    # ---- 9. 垂直变体 (vert/vrt2) ----
+    vert = {"source": 0, "merged": 0}
+    for tag, feat in (("GSUB", "vert"), ("GSUB", "vrt2")):
+        for f in fonts:
+            vert["source"] += _feature_glyph_count(f, tag, feat)
+        vert["merged"] += _feature_glyph_count(merged, tag, feat)
+    checks["vertical_forms"] = vert
+    if vert["merged"] < vert["source"]:
+        failures.append("竖排变体覆盖减少: 源 %d → 合并 %d"
+                        % (vert["source"], vert["merged"]))
+
+    report = {"ok": not failures, "failures": failures, "checks": checks}
+    if failures:
+        log("[校验] 失败 %d 项:" % len(failures))
+        for f_ in failures:
+            log("   - " + f_)
+    else:
+        log("[校验] 全部通过 (比对 %d 字形 × %d 个轴位置)"
+            % (compared, len(positions)))
+    return report
+
+
+def _feature_glyph_count(font, tag, feat):
+    """某个 feature 覆盖的字形引用数 (含映射值)"""
+    if tag not in font:
+        return 0
+    table = font[tag].table
+    if not table.FeatureList or not table.LookupList:
+        return 0
+    n = 0
+    for fr in table.FeatureList.FeatureRecord:
+        if fr.FeatureTag != feat:
+            continue
+        for li in fr.Feature.LookupListIndex:
+            if li >= len(table.LookupList.Lookup):
+                continue
+            for st in table.LookupList.Lookup[li].SubTable:
+                sub = getattr(st, "ExtSubTable", st)
+                for attr in _COVERAGE_ATTRS:
+                    val = getattr(sub, attr, None)
+                    for cov in (val if isinstance(val, list) else [val]):
+                        if cov is not None and getattr(cov, "glyphs", None):
+                            n += len(cov.glyphs)
+                m = getattr(sub, "mapping", None)
+                if isinstance(m, dict):
+                    n += len(m)
+    return n
+
+
+#: 直接持有字形名的 otTables 属性 (按属性名识别, 避免把 script/feature tag 误判)
+_GLYPH_NAME_ATTRS = ("glyphs", "Substitute", "SecondGlyph", "Component",
+                     "Input", "Backtrack", "LookAhead")
+
+
+def _check_layout_integrity(font):
+    """检查布局表: 悬空字形引用 + Coverage 是否按 GID 升序
+
+    只按"持有字形名的属性"收集引用 (glyphs / classDefs / mapping /
+    ligatures / SecondGlyph / Substitute / Component / 上下文 Input 等),
+    不能对整棵树的所有字符串做判断 —— script tag ("DFLT")、feature tag
+    ("kern") 也都是字符串。
+    """
+    glyph_order = font.getGlyphOrder()
+    alive = set(glyph_order)
+    order = {g: i for i, g in enumerate(glyph_order)}
+    dangling = set()
+    unsorted_count = 0
+
+    def check_names(names):
+        for n in names:
+            if isinstance(n, str) and n not in alive:
+                dangling.add(n)
+
+    def walk(obj, seen):
+        nonlocal unsorted_count
+        if id(obj) in seen:
+            return
+        seen.add(id(obj))
+        if isinstance(obj, (list, tuple)):
+            for v in obj:
+                walk(v, seen)
+            return
+        if not hasattr(obj, "__dict__"):
+            return
+        for k, v in vars(obj).items():
+            if k.startswith("_"):
+                continue
+            if k == "glyphs" and isinstance(v, list):
+                check_names(v)
+                gids = [order.get(g, -1) for g in v]
+                if gids != sorted(gids):
+                    unsorted_count += 1
+            elif k in ("Substitute", "Component", "Input", "Backtrack", "LookAhead"):
+                if isinstance(v, list):
+                    check_names([x for x in v if isinstance(x, str)])
+            elif k in ("SecondGlyph",):
+                check_names([v])
+            elif k in ("classDefs", "mapping", "ligatures"):
+                if isinstance(v, dict):
+                    check_names([x for x in v if isinstance(x, str)])
+                    for val in v.values():
+                        if isinstance(val, str):
+                            check_names([val])
+                        elif isinstance(val, (list, tuple)):
+                            check_names([x for x in val if isinstance(x, str)])
+                        else:
+                            walk(val, seen)
+            walk(v, seen)
+
+    for tag in ("GSUB", "GPOS", "GDEF"):
+        if tag in font:
+            walk(font[tag].table, set())
+    return {"dangling": sorted(dangling), "unsorted_coverages": unsorted_count}

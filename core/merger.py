@@ -6,7 +6,7 @@ from ..utils.detect import is_cff, is_ttf, is_variable, type_label
 from ..format.converter import convert_font_format
 from ..format.static_extract import variable_to_static
 from ..format.subsetter import create_glyph_subset
-from .conflict import resolve_conflicts
+from .conflict import resolve_conflicts, plan_alias
 from .glyph_copy import merge_glyphs_via_ttx
 
 
@@ -64,11 +64,16 @@ def check_compatibility(main_font, base_font):
         warnings.append(
             "混合轮廓格式: 主字体为{}, 打底为{}. 将自动转换打底字体".format(main_type, base_type))
 
-    # 可变字体提醒
+    # 可变字体提醒: 走 merge_two 的可变路径时, 打底字体会被实例化为静态
+    # (新增字形将失去轴变化) —— 这是**信息损失**, 必须明示。
     if is_variable(main_font):
-        warnings.append("主字体为可变字体, 将先实例化为静态再合并")
+        warnings.append(
+            "主字体为可变字体: 默认路径保留主字体可变性, 但打底字形按默认实例合并 "
+            "(新增字形不随轴变化); 同源分片请改用 merge_subsets()")
     if is_variable(base_font):
-        warnings.append("打底字体为可变字体, 将先实例化为静态再合并")
+        warnings.append(
+            "打底字体为可变字体: 将先实例化为静态再合并, 其字形不随轴变化; "
+            "同源分片请改用 merge_subsets()")
 
     # UPM 不匹配
     main_upm = main_font["head"].unitsPerEm
@@ -284,6 +289,12 @@ class FontMerger:
                 b = _base
 
         # ── 冲突检测与合并 ──
+        # 自动命名字形 (post 3.0 的 glyphNNNNN) 跨字体同名但不同源: 改名后加入
+        alias = plan_alias(m, b)
+        if alias:
+            from .glyph_rename import renamed_copy
+            print(f"  [改名] {len(alias)} 个自动命名字形重名, 加别名后加入")
+            b = renamed_copy(b, alias)
         cf = resolve_conflicts(m, b)
         print(f"  [冲突] {len(cf)} 个字形")
         mn = set(m.getGlyphOrder())

@@ -7,14 +7,30 @@ Logic.md 第 3 条:
   (剔除与已删除字形相关的项); 如有冲突以主字体为基准。
 
 实现思路 (fontTools.subset 官方机制):
-  打底字体的布局表先按"存活字形集"做引用修剪 —
+  打底字体的布局表先按"存活字形集"做引用修剪 ——
   lookup 的规则只保留覆盖了存活字形的条目, 闭包自动补入
   规则依赖的字形 (如 kern 对), 最后与主字体布局表合并。
-  冲突 (同 feature/lookup 语义) 以主字体为准。
+
+合并细则:
+  * 字形取舍: 打底 lookup 引用的字形必须都在主字体里, 否则整条 lookup 跳过
+    (Extension 子表要展开递归, 见 _lookup_glyphs_in_font);
+  * 同 tag feature **做 lookup 并集**并入主记录 (而非整条跳过 ——
+    每个打底字体的 vert/vrt2/kern/mark 只覆盖自己的字形);
+    FeatureParams 不同才另立记录;
+  * 打底的 ScriptList/LangSys 一并并入, 之后 FeatureList 按 tag 排序并
+    重写全部 FeatureIndex (否则追加的 feature 不可达);
+  * GDEF GlyphClassDef/MarkAttachClassDef 取并集 (主优先), ItemVariationStore
+    做 region 并集 + VarData 拼接, 打底 GPOS 的 VariationIndex 按基址重定位;
+  * 追加/改名之后调用 resort_layout() 修复 Coverage 与并行数组的同序不变量。
 """
 import copy
 from fontTools.ttLib import TTFont
 from fontTools.subset import Subsetter, Options
+
+from .layout_union import (_freeze, find_or_create_lang, lang_systems,
+                           lang_systems_with_tag, offset_var_devices,
+                           remap_glyph_names, resort_layout)
+from .varstore import VarStoreUnion
 
 
 def _layout_tags():
@@ -105,10 +121,18 @@ def merge_base_layout(main_font, base_pruned, kept_glyphs):
         print("  [OT合并] 打底无布局表, 跳过")
         return main_font
 
+    # GDEF VarStore 并集: 主的 VarData 保持在前 (基址 0), 打底的接在后面。
+    # 打底 GPOS 里所有 VariationIndex 的 outer 索引要加上打底的基址偏移。
+    var_union = VarStoreUnion()
+    var_offset = 0
+
     # 合并 GDEF (GlyphClassDef/MarkAttach 等): 主优先
     if "GDEF" in base_layout:
         if "GDEF" in main_layout:
-            _merge_gdef(main_font, main_layout["GDEF"], base_layout["GDEF"], kept)
+            var_union.add(getattr(main_layout["GDEF"].table, "VarStore", None))
+            var_offset = _merge_gdef(main_font, main_layout["GDEF"],
+                                     base_layout["GDEF"], kept, var_union)
+            _apply_varstore(main_font, main_layout["GDEF"], var_union)
         else:
             # 主无 GDEF: 采用打底 GDEF, 但只保留名称与主字体一致的字形
             # (避免打底 name 空间如 uni0041 与主 A 错位)
@@ -120,14 +144,29 @@ def merge_base_layout(main_font, base_pruned, kept_glyphs):
             continue
         if tag not in main_layout:
             main_font[tag] = copy.deepcopy(base_layout[tag])
-            print(f"  [OT合并] {tag}: 来自打底 (主无, {sum(len(fr.FeatureRecord) for fr in base_layout[tag].table.FeatureList.FeatureRecord) if base_layout[tag].table.FeatureList else 0} features)")
+            n_feat = (sum(len(fr.FeatureRecord)
+                          for fr in base_layout[tag].table.FeatureList.FeatureRecord)
+                      if base_layout[tag].table.FeatureList else 0)
+            print(f"  [OT合并] {tag}: 来自打底 (主无, {n_feat} features)")
             continue
 
         main_tbl = main_layout[tag].table
         base_tbl = base_layout[tag].table
-        _merge_gsub_gpos(main_font, tag, main_tbl, base_tbl)
+        _merge_gsub_gpos(main_font, tag, main_tbl, base_tbl, var_offset)
 
     return main_font
+
+
+def _apply_varstore(font, main_gdef, var_union):
+    """把并集 ItemVariationStore 写回主的 GDEF, 并把 Version 提升到 1.3"""
+    if not var_union:
+        return
+    table = main_gdef.table
+    table.VarStore = var_union.build()
+    version = 0x00010003
+    if table.Version and table.Version >= 0x00010002:
+        version = max(version, table.Version)
+    table.Version = version
 
 
 def _use_base_gdef(font, base_gdef):
@@ -152,76 +191,211 @@ def _use_base_gdef(font, base_gdef):
     print(f"  [OT合并] GDEF: 来自打底 (主无, 过滤后 {n_cls} 个字类)")
 
 
-def _merge_gdef(font, main_gdef, base_gdef, kept):
-    """GDEF 合并: 主优先, 打底补缺 (仅当主无相应子表)。
+def _merge_gdef(font, main_gdef, base_gdef, kept, var_union=None):
+    """GDEF 合并: 类定义取并集 (冲突以主为准), VarStore 做并集。
 
-    GDEF 的 GlyphClassDef 等引用字形, CID→name 统一后两者命名一致;
-    保留主的字类定义, 打底的 MarkGlyphSets 若主无则补入。
+    GlyphClassDef / MarkAttachClassDef 是"字形 → 类"的映射, 主字体的值优先,
+    打底补齐新增字形 —— 只保留主的会让新增字形丢失 mark/base 分类, GPOS 的
+    mark 附着对它失效。MarkGlyphSetsDef 的 Coverage 索引被 LookupFlag 直接
+    引用, 索引体系不同, 仍只在主缺失时整体采用。
+
+    Returns:
+        打底 VarData 在并集中的基址偏移 (其 GPOS VariationIndex 需 +offset)
     """
+    from fontTools.ttLib.tables.otTables import ClassDef
+
     mt = main_gdef.table
     bt = base_gdef.table
-    # GlyphClassDef: 主优先 (主无则用打底)
-    if mt.GlyphClassDef is None and bt.GlyphClassDef is not None:
-        from fontTools.ttLib.tables.otTables import ClassDef
-        mt.GlyphClassDef = copy.deepcopy(bt.GlyphClassDef)
-        # 只保留存活字形 (合并后的主字形集 + 新增字形集)
-        alive = set(font.getGlyphOrder())
-        if mt.GlyphClassDef.classDefs:
-            mt.GlyphClassDef.classDefs = {
-                g: v for g, v in mt.GlyphClassDef.classDefs.items() if g in alive
-            }
-    # MarkGlyphSets: 主无则用打底
-    if getattr(mt, "MarkGlyphSetsDef", None) is None and getattr(bt, "MarkGlyphSetsDef", None) is not None:
+    alive = set(font.getGlyphOrder())
+
+    added_cls = 0
+    if bt.GlyphClassDef is not None and bt.GlyphClassDef.classDefs:
+        if mt.GlyphClassDef is None:
+            mt.GlyphClassDef = ClassDef()
+            mt.GlyphClassDef.classDefs = {}
+        for g, v in bt.GlyphClassDef.classDefs.items():
+            if g in alive and g not in mt.GlyphClassDef.classDefs:
+                mt.GlyphClassDef.classDefs[g] = v
+                added_cls += 1
+    if getattr(bt, "MarkAttachClassDef", None) is not None and bt.MarkAttachClassDef.classDefs:
+        if getattr(mt, "MarkAttachClassDef", None) is None:
+            mt.MarkAttachClassDef = ClassDef()
+            mt.MarkAttachClassDef.classDefs = {}
+        for g, v in bt.MarkAttachClassDef.classDefs.items():
+            if g in alive and g not in mt.MarkAttachClassDef.classDefs:
+                mt.MarkAttachClassDef.classDefs[g] = v
+
+    # MarkGlyphSets: 主无则用打底 (索引被 LookupFlag bit4 引用, 不跨字体并集)
+    if (getattr(mt, "MarkGlyphSetsDef", None) is None
+            and getattr(bt, "MarkGlyphSetsDef", None) is not None):
         mt.MarkGlyphSetsDef = copy.deepcopy(bt.MarkGlyphSetsDef)
-    print("  [OT合并] GDEF: 保留主字体 (打底补缺已有)" if mt.GlyphClassDef is not None else "  [OT合并] GDEF: 打底提供 GlyphClassDef")
+
+    n_cls = len(mt.GlyphClassDef.classDefs) if mt.GlyphClassDef is not None else 0
+    print(f"  [OT合并] GDEF: 字类 {n_cls} (打底补 {added_cls})")
+
+    # VarStore 并集: 打底的 GPOS VariationIndex 要按基址偏移重定位
+    if var_union is not None:
+        return var_union.add(getattr(bt, "VarStore", None))
+    return 0
 
 
-def _merge_gsub_gpos(font, tag, main_tbl, base_tbl):
-    """GSUB/GPOS 表级合并: 保留主的, 追加打底的非冲突 feature。
+def _merge_gsub_gpos(font, tag, main_tbl, base_tbl, var_offset=0):
+    """GSUB/GPOS 表级合并: 主字体全部保留, 打底 lookup **并集**追加。
 
-    冲突判断: feature tag 相同 → 以主为准跳过打底的。
-    lookup 追加时需要把打底 feature 的 LookupListIndex 重映射到主表。
+    与"同 tag 就整条跳过"的旧逻辑不同: 同一个 tag 的 lookup 做并集,
+    并入主的同一条 FeatureRecord。每个打底字体 (或分片) 的 vert/vrt2/kern/mark
+    只覆盖自己的字形, 跳过等于丢掉后面所有字体的特性; 只有 FeatureParams
+    不同 (ss01/size 等) 才另立一条记录。
+
+    打底的 ScriptList/LangSys 一并并入 (否则追加的 feature 根本不可达),
+    最后 FeatureList 按 tag 排序并重写全部 FeatureIndex。
     """
-    main_features = set()
-    if main_tbl.FeatureList and main_tbl.FeatureList.FeatureRecord:
-        main_features = {fr.FeatureTag for fr in main_tbl.FeatureList.FeatureRecord}
+    if main_tbl.LookupList is None:
+        from fontTools.ttLib.tables.otTables import LookupList
+        main_tbl.LookupList = LookupList()
+        main_tbl.LookupList.Lookup = []
+    main_lookups = main_tbl.LookupList.Lookup
+    base_lookups = base_tbl.LookupList.Lookup if base_tbl.LookupList else []
+    if (not base_lookups or base_tbl.FeatureList is None
+            or not base_tbl.FeatureList.FeatureRecord):
+        print(f"  [OT合并] {tag}: 打底无 feature/lookup, 只保留主")
+        return
 
-    added = 0
-    if base_tbl.FeatureList and base_tbl.FeatureList.FeatureRecord:
-        # 主 LookupList 初始化
-        if main_tbl.LookupList is None:
-            from fontTools.ttLib.tables.otTables import LookupList
-            main_tbl.LookupList = LookupList()
-            main_tbl.LookupList.Lookup = []
-        main_lookups = main_tbl.LookupList.Lookup
-        base_lookups = base_tbl.LookupList.Lookup if base_tbl.LookupList else []
+    if main_tbl.FeatureList is None:
+        from fontTools.ttLib.tables.otTables import FeatureList
+        main_tbl.FeatureList = FeatureList()
+        main_tbl.FeatureList.FeatureRecord = []
 
-        for fr in base_tbl.FeatureList.FeatureRecord:
-            if fr.FeatureTag in main_features:
+    # 同 tag (+ 同 FeatureParams) 的主记录: 打底的 lookup 并入其中
+    main_by_key = {}
+    for fr in main_tbl.FeatureList.FeatureRecord:
+        main_by_key.setdefault(_freeze((fr.FeatureTag, _params_key(fr))), fr)
+
+    lookup_cache = {}
+
+    def merged_lookup(li):
+        if li in lookup_cache:
+            return lookup_cache[li]
+        new_lookup = copy.deepcopy(base_lookups[li])
+        # 字形名对齐: uniXXXX → 主字体的等价名 (A, ae 等)
+        _remap_lookup_glyph_names(font, new_lookup)
+        # 校验: lookup 引用的所有字形必须存在于主字体, 否则跳过
+        if not _lookup_glyphs_in_font(font, new_lookup):
+            lookup_cache[li] = None
+            return None
+        # GPOS VariationIndex 重定位到并集 VarStore
+        offset_var_devices(new_lookup, var_offset)
+        main_lookups.append(new_lookup)
+        lookup_cache[li] = len(main_lookups) - 1
+        return lookup_cache[li]
+
+    new_records = []
+    feature_of_base = {}      # 打底 FeatureRecord 下标 → 合并后记录对象
+    unioned = 0
+    for i, fr in enumerate(base_tbl.FeatureList.FeatureRecord):
+        idxs = []
+        for li in fr.Feature.LookupListIndex:
+            if li >= len(base_lookups):
                 continue
-            # 重映射: 深拷贝 feature, 其引用的 lookup 追加到主后改索引
-            new_feat = copy.deepcopy(fr)
-            new_idx = []
-            for li in new_feat.Feature.LookupListIndex:
-                if li < len(base_lookups):
-                    new_lookup = copy.deepcopy(base_lookups[li])
-                    # 字形名对齐: uniXXXX → 主字体的等价名 (A, ae 等)
-                    _remap_lookup_glyph_names(font, new_lookup)
-                    # 校验: lookup 引用的所有字形必须存在于主字体, 否则跳过
-                    if not _lookup_glyphs_in_font(font, new_lookup):
-                        continue
-                    main_lookups.append(new_lookup)
-                    new_idx.append(len(main_lookups) - 1)
-            new_feat.Feature.LookupListIndex = new_idx
-            if not new_idx:
-                continue  # 无有效 lookup
-            main_tbl.FeatureList.FeatureRecord.append(new_feat)
-            main_features.add(fr.FeatureTag)
-            added += 1
-    if added:
-        print(f"  [OT合并] {tag}: 追加 {added} 个打底 feature (主冲突跳过)")
-    else:
-        print(f"  [OT合并] {tag}: 全部与主冲突或为空, 只保留主")
+            mi = merged_lookup(li)
+            if mi is not None and mi not in idxs:
+                idxs.append(mi)
+        if not idxs:
+            continue
+        key = _freeze((fr.FeatureTag, _params_key(fr)))
+        target = main_by_key.get(key)
+        if target is not None:
+            for mi in idxs:
+                if mi not in target.Feature.LookupListIndex:
+                    target.Feature.LookupListIndex.append(mi)
+            unioned += 1
+        else:
+            target = copy.deepcopy(fr)
+            target.Feature.LookupListIndex = list(idxs)
+            main_by_key[key] = target
+            new_records.append(target)
+        feature_of_base[i] = target
+
+    if not feature_of_base:
+        print(f"  [OT合并] {tag}: 打底 feature 无有效 lookup, 只保留主")
+        return
+
+    records = list(main_tbl.FeatureList.FeatureRecord) + new_records
+    if base_tbl.ScriptList is not None:
+        _merge_script_list(main_tbl, base_tbl.ScriptList, feature_of_base, records)
+    _sort_feature_list(main_tbl, records)
+
+    # 主表可能根本没有 FeatureVariations 属性 (Version 1.0)
+    if getattr(main_tbl, "FeatureVariations", None) is not None:
+        print(f"  [OT合并] {tag}: 丢弃主的 FeatureVariations "
+              f"(feature 索引已重排, 无法安全保留)")
+        main_tbl.FeatureVariations = None
+    # 追加 + 改名后修复 OpenType 排序不变量 (Coverage 与并行数组必须同序)
+    resort_layout(font)
+    print(f"  [OT合并] {tag}: 并入 {unioned} 条同 tag feature, "
+          f"新增 {len(new_records)} 条, 共 {len(records)} 条")
+
+
+def _params_key(fr):
+    """FeatureParams 的可哈希签名 (无参数为 None)"""
+    params = fr.Feature.FeatureParams
+    return (type(params).__name__, _freeze(params)) if params is not None else None
+
+
+def _merge_script_list(main_tbl, base_script_list, feature_of_base, records):
+    """把打底的 ScriptList/LangSys 并入主 (feature 索引重定位到合并后列表)"""
+    from fontTools.ttLib.tables import otTables as ot
+
+    pos = {id(fr): i for i, fr in enumerate(records)}
+    if main_tbl.ScriptList is None:
+        main_tbl.ScriptList = ot.ScriptList()
+        main_tbl.ScriptList.ScriptRecord = []
+    by_tag = {sr.ScriptTag: sr for sr in main_tbl.ScriptList.ScriptRecord}
+    for bsr in base_script_list.ScriptRecord:
+        msr = by_tag.get(bsr.ScriptTag)
+        if msr is None:
+            msr = copy.deepcopy(bsr)
+            for lang in lang_systems(msr.Script):
+                lang.FeatureIndex = sorted({pos[id(feature_of_base[i])]
+                                            for i in lang.FeatureIndex
+                                            if i in feature_of_base})
+                req = getattr(lang, "ReqFeatureIndex", 0xFFFF)
+                if req not in (0xFFFF, None):
+                    lang.ReqFeatureIndex = (pos[id(feature_of_base[req])]
+                                            if req in feature_of_base else 0xFFFF)
+            main_tbl.ScriptList.ScriptRecord.append(msr)
+            by_tag[bsr.ScriptTag] = msr
+            continue
+        for lang_tag, b_lang in lang_systems_with_tag(bsr.Script):
+            m_lang = find_or_create_lang(msr.Script, lang_tag)
+            for fi in b_lang.FeatureIndex:
+                fr = feature_of_base.get(fi)
+                if fr is None:
+                    continue
+                mi = pos[id(fr)]
+                if mi not in m_lang.FeatureIndex:
+                    m_lang.FeatureIndex.append(mi)
+
+
+def _sort_feature_list(main_tbl, records):
+    """FeatureList 按 tag 字母序排序 (规范要求), 并重写全部 feature 索引"""
+    order = sorted(range(len(records)), key=lambda i: (records[i].FeatureTag, i))
+    remap = {old: new for new, old in enumerate(order)}
+    main_tbl.FeatureList.FeatureRecord = [records[i] for i in order]
+    if main_tbl.ScriptList is None:
+        return
+    for sr in main_tbl.ScriptList.ScriptRecord:
+        if sr.Script.LangSysRecord:
+            sr.Script.LangSysRecord.sort(key=lambda lr: lr.LangSysTag)
+        else:
+            sr.Script.LangSysRecord = []
+        for lang in lang_systems(sr.Script):
+            lang.FeatureIndex = sorted({remap[i] for i in lang.FeatureIndex
+                                        if i in remap})
+            req = getattr(lang, "ReqFeatureIndex", 0xFFFF)
+            if req not in (0xFFFF, None):
+                lang.ReqFeatureIndex = remap.get(req, 0xFFFF)
+    main_tbl.ScriptList.ScriptRecord.sort(key=lambda sr: sr.ScriptTag)
 
 
 def _remap_lookup_glyph_names(font, lookup):
@@ -298,13 +472,9 @@ def _remap_obj(font, obj, remap, seen=None):
                 _remap_obj(font, v, remap, seen)
         return
     if hasattr(obj, "__dict__"):
-        # Coverage 物件: 无条件按主字体 glyph id 重新排序 (GSUB/GPOS 要求升序)
-        if hasattr(obj, "glyphs") and isinstance(getattr(obj, "glyphs", None), list):
-            try:
-                order = {g: i for i, g in enumerate(font.getGlyphOrder())}
-                obj.glyphs = sorted(obj.glyphs, key=lambda g: order.get(g, 1 << 30))
-            except Exception:
-                pass
+        # 注意: 这里**不**单独排序 Coverage —— 改名会改变 GID 顺序, 但 MarkBasePos
+        # 等的 Coverage 与并行数组必须同序; 统一交给 resort_layout() 在合并收尾时
+        # 按 P4 清单 (Coverage / PairValueRecord / MarkArray / RuleSet …) 处理。
         for k, v in list(vars(obj).items()):
             if k.startswith("_"):
                 continue
@@ -316,63 +486,60 @@ def _remap_obj(font, obj, remap, seen=None):
                 _remap_obj(font, v, remap, seen)
 
 
-def _sort_coverage(font, cov):
-    """按主字体 glyph id 排序 Coverage (Coverage 表要求升序)"""
-    try:
-        order = {g: i for i, g in enumerate(font.getGlyphOrder())}
-        cov.glyphs = sorted(cov.glyphs, key=lambda g: order.get(g, 1 << 30))
-    except Exception:
-        pass
+def _collect_strings(obj, names=None, seen=None):
+    """收集对象树里的全部字符串 (dict 键 + 值), 返回 set[str]。
+
+    lookup 子表里的字符串**只可能是字形名** —— Coverage.glyphs、
+    ClassDef.classDefs 键、SingleSubst.mapping 键值、AlternateSubst.alternates、
+    LigatureSubst.ligatures 键与 Ligature.Component、上下文规则的
+    Input/Backtrack/LookAhead…… 故无需逐属性枚举 (枚举必漏: 漏掉
+    AlternateSubst/LigatureSubst 时校验会"通过", 保存时才 KeyError)。
+    Extension 子表 (ExtSubTable) 照常递归。
+    """
+    if names is None:
+        names = set()
+    if seen is None:
+        seen = set()
+    if isinstance(obj, str):
+        names.add(obj)
+        return names
+    if id(obj) in seen:
+        return names
+    seen.add(id(obj))
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(k, str):
+                names.add(k)
+            _collect_strings(v, names, seen)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            _collect_strings(v, names, seen)
+    elif hasattr(obj, "__dict__"):
+        for k, v in vars(obj).items():
+            if k.startswith("_"):
+                continue
+            _collect_strings(v, names, seen)
+    return names
 
 
 def _lookup_glyphs_in_font(font, lookup):
     """校验 lookup 引用的所有字形都在主字体中。
 
-    收集: Coverage.glyphs + ClassDef.classDefs.keys() + 其他显式字形引用
-    (PairPos 的 ClassDef1/2, SinglePos/SingleSubst 的 mapping 键值等)
+    Extension(Ext) 子表必须递归展开 —— 只看外层的话一个字形都收集不到,
+    于是"校验通过", 打底已删字形的引用会被原样带进主字体, 保存时才炸。
     """
     alive = set(font.getGlyphOrder())
     try:
-        seen = set()
+        names = set()
         for st in getattr(lookup, "SubTable", []) or []:
-            # 通配收集所有 *Coverage 属性 (Coverage/BaseMark/Input/LookAhead/Backtrack…)
-            for attr in vars(st) if hasattr(st, "__dict__") else []:
-                if not attr.endswith("Coverage") and not attr.endswith("Coverages"):
-                    continue
-                val = getattr(st, attr, None)
-                if val is None:
-                    continue
-                items = val if isinstance(val, list) else [val]
-                for item in items:
-                    if item is not None and getattr(item, "glyphs", None):
-                        seen.update(item.glyphs)
-            # ClassDef (PairPos/CursivePos/MarkBasePos 等的 ClassDef1/2)
-            for attr in ("ClassDef1", "ClassDef2", "ClassDef"):
-                cd = getattr(st, attr, None)
-                if cd is not None and getattr(cd, "classDefs", None):
-                    seen.update(cd.classDefs.keys())
-            # SingleSubst/SinglePos 的 mapping 与 LigatureSubst 的 Component
-            for attr in ("mapping", "glyph", "value"):
-                v = getattr(st, attr, None)
-                if attr == "glyph" and isinstance(v, str):
-                    seen.add(v)
-                elif isinstance(v, dict):
-                    for k, val in v.items():
-                        if isinstance(k, str):
-                            seen.add(k)
-                        if isinstance(val, str):
-                            seen.add(val)
-                        elif isinstance(val, list):
-                            for item in val:
-                                if isinstance(item, str):
-                                    seen.add(item)
-                                elif hasattr(item, "Component"):
-                                    seen.update(c for c in item.Component if isinstance(c, str))
-        if not seen:
+            _collect_strings(st, names)
+        names.discard("")
+        if not names:
             return True  # 无字形引用, 视为安全
-        return seen <= alive
+        return names <= alive
     except Exception:
-        return True  # 无法校验时保守通过
+        # 校验失败时**跳过**该 lookup: 宁可少一个特性, 也不能产出保存不了的字体
+        return False
 
 
 def merge_ot_features(main_font, base_font, kept_glyphs):

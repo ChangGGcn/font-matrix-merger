@@ -9,12 +9,15 @@ from fontTools.varLib.instancer import instantiateVariableFont
 from ..utils.detect import is_variable
 
 
-def variable_to_static(font, remove_overlaps=True):
+def variable_to_static(font, remove_overlaps=False):
     """从可变字体生成静态实例。CFF2 自动转换为 CFF (支持 CID)。
 
     Args:
         font: 可变字体 (TTFont)
-        remove_overlaps: 是否布尔合并重叠轮廓 (默认 True，解决渲染问题)
+        remove_overlaps: 是否布尔合并重叠轮廓。
+            默认 False —— 布尔并集需要 pathops 依赖且会**改写轮廓**,
+            对"保真合并/对照验证"类任务会引入偏差;
+            仅在确有渲染问题 (重叠区域填充异常) 时显式开启。
     """
     if not is_variable(font):
         return copy.deepcopy(font)
@@ -71,18 +74,21 @@ def variable_to_static(font, remove_overlaps=True):
             print(f"  [警告] CFF2→CFF 转换失败: {e}")
             import traceback; traceback.print_exc()
 
-    # 布尔合并重叠轮廓 (解决插值后重叠区域的渲染问题)
+    # CFF2→CFF 转换后表间名称不一致 (CID vs name-keyed): 需要 save→reload
+    # 消除不一致 (参考 fontTools CFF2ToCFF CLI 模式)。与是否布尔合并无关。
+    if _had_cff2:
+        try:
+            stream = BytesIO()
+            result.save(stream)
+            stream.seek(0)
+            result = TTFont(stream, recalcTimestamp=False, recalcBBoxes=False)
+        except Exception as e:
+            print(f"  [警告] CFF2→CFF 归一失败: {e}")
+
+    # 布尔合并重叠轮廓 (解决插值后重叠区域的渲染问题; 会改写轮廓, 默认关闭)
     if remove_overlaps:
         try:
             from fontTools.ttLib.removeOverlaps import removeOverlaps
-
-            # CFF2→CFF 转换后表间名称不一致 (CID vs name-keyed)
-            # 需要 save→reload 消除不一致 (参考 fontTools CFF2ToCFF CLI 模式)
-            if _had_cff2:
-                stream = BytesIO()
-                result.save(stream)
-                stream.seek(0)
-                result = TTFont(stream, recalcTimestamp=False, recalcBBoxes=False)
 
             removeOverlaps(result, ignoreErrors=True)
             print(f"  [重叠合并] 完成 ({len(result.getGlyphOrder())} glyphs)")

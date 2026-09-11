@@ -10,11 +10,13 @@ import os, sys, copy, time
 
 # 确保包路径正确
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_project_dir = os.path.dirname(os.path.dirname(_script_dir))
+_repo_dir = os.path.dirname(_script_dir)
+_project_dir = os.path.dirname(_repo_dir)
 _test_dir = os.path.join(_project_dir, "test")
 _output_dir = os.path.join(_project_dir, "test", "samples")
 
 sys.path.insert(0, _project_dir)
+sys.path.insert(0, _repo_dir)   # 使 tests.local_fonts 在"直接运行脚本"模式下也可导入
 
 from FontMerger import (FontMerger, type_label, get_copyrights,
                          get_family, apply_naming, is_cff, is_ttf,

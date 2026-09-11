@@ -11,21 +11,24 @@ v2 (真路径版): C/D 组直接传原始 VF, 保留可变性输出 + Axis 并�
 """
 import os, sys, copy, time
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_project_dir = os.path.dirname(os.path.dirname(_script_dir))
+_repo_dir = os.path.dirname(_script_dir)
+_project_dir = os.path.dirname(_repo_dir)
 _test_dir = os.path.join(_project_dir, "test")
 _output_dir = os.path.join(_test_dir, "samples", "matrix")
 sys.path.insert(0, _project_dir)
+sys.path.insert(0, _repo_dir)   # 使 tests.local_fonts 在"直接运行脚本"模式下也可导入
 
 from FontMerger import *
 from fontTools.ttLib import TTFont
 
-#: 公开 OFL 字体: 角色 -> 相对 _test_dir 的路径
+#: 公开 OFL 字体: 角色 -> 相对 _test_dir 的路径 (可给多个候选名)
 OPEN_FONTS = {
     "sOTF_latin":  "OpenType/LibreCaslonText-Regular.otf",
     "sTTF_latin":  "TrueType/LXGWWenKaiTC-Regular.ttf",
     "vOTF_serif":  "otf_variable_fonts/SourceSerif4Variable-Roman.otf",
     "vOTF_cjk_jp": "otf_variable_fonts/SourceHanSansJP-VF.otf",
-    "vTTF_cjk":    "ttf_variable_fonts/ZedTextSCVF.ttf",
+    "vTTF_cjk":    ("ttf_variable_fonts/ZedTextSCVF.ttf",
+                    "ttf_variable_fonts/ZedTextJapaneseVF.ttf"),
 }
 
 #: 本地授权字体角色 (真实路径见 tests/local_fonts.py, 未配置时 None)
@@ -37,11 +40,12 @@ LOCAL_ROLES = {
 
 
 def L(rel):
-    """打开相对 _test_dir 的字体；不存在返回 None"""
-    p = os.path.join(_test_dir, rel)
-    if not os.path.exists(p):
-        return None
-    return TTFont(p)
+    """打开相对 _test_dir 的字体 (rel 可为候选名列表)；不存在返回 None"""
+    for r in (rel if isinstance(rel, (list, tuple)) else [rel]):
+        p = os.path.join(_test_dir, r)
+        if os.path.exists(p):
+            return TTFont(p)
+    return None
 
 
 def LC(role):
@@ -90,7 +94,8 @@ def mg(label, m, b, extra="", mem=None):
     ext = ".otf" if is_cff(r) else ".ttf"
     fp = os.path.join(_output_dir, f'{label}{extra}{ext}')
     try:
-        r.save(fp)
+        from FontMerger.utils.save import save_font
+        save_font(r, fp)
     except Exception as e:
         print(f'  {label}: SAVE FAIL - {e}')
         return None
