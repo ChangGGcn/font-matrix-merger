@@ -234,7 +234,8 @@ def _compose_cff2_base(m, b, base_font, plan):
     if not (is_cff2_variable(m) and is_cff2_variable(base_font)):
         return False
     src_tags = [a.axisTag for a in base_font["fvar"].axes]
-    main_tags = [a.axisTag for a in m["fvar"].axes]
+    # main_maps 的插入序 = 主字体原始 fvar 轴序 (此刻 m 的 fvar 已是合并轴空间)
+    main_tags = list(plan["main_maps"])
     dst_tags = list(plan["fvar"])
     base_var = copy.deepcopy(base_font)
     rep = reparametrize_cff2(base_var, plan["base_maps"], src_tags, dst_tags)
@@ -425,7 +426,7 @@ def _finish_variable_merge(merger, result, m, b, variable_source, plan):
         if merger.verify_compose:
             from .verify import verify_composition
             verify_composition(result, m, variable_source, added_now,
-                               max_positions=4)
+                               max_positions=4, adv_tolerance=3.0)
     elif variable_source is not None:
         moved = transfer_glyph_variations(result, variable_source, added_now)
         if moved:

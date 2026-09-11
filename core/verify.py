@@ -29,6 +29,13 @@ def _pen_value(font, glyph_name, glyph_set=None):
     return pen.value
 
 
+def _pen(glyph_name, glyph_set):
+    """在给定 glyphSet 上画一个字形 (返回 RecordingPen 结果)"""
+    pen = RecordingPen()
+    glyph_set[glyph_name].draw(pen)
+    return pen.value
+
+
 def _coords_delta(a, b, tolerance):
     """比较两个 RecordingPen 结果; 返回是否在容差内 (及最大偏差)"""
     if len(a) != len(b):
@@ -395,15 +402,26 @@ _GLYPH_NAME_ATTRS = ("glyphs", "Substitute", "SecondGlyph", "Component",
 
 
 def verify_composition(merged, main_font, base_font, added_glyphs, sample=30,
-                       tolerance=1.0, max_positions=6, verbose=False):
+                       tolerance=1.0, max_positions=6, verbose=False,
+                       adv_tolerance=None):
     """验证跨设计空间合成是否逐点等价 (不通过抛 AssertionError)。
 
     语义: 合并字体在位置 p 的实例, 其**新增字形**应等于打底字体在 p (按各自
     轴投影) 的实例, **主字体字形**应等于主字体在 p 的实例。网格采样, 抽样比对
-    轮廓与 hmtx; 容差默认 1 单位 (整数化/F2Dot14 量化级别)。
+    轮廓与 hmtx; 轮廓容差默认 1 单位 (整数化/F2Dot14 量化级别)。
+
+    adv_tolerance: 字宽容差, 缺省同 tolerance。重参数化后的 HVAR 增量是**整数**,
+    一个源列拆成多个 hat 后逐个取整, 非默认位置上的残差可达几个单位, 因此
+    调用方会给它一个更宽的值 (CFF2 路径实测 ≤ 2 单位)。
+
+    采样点只取各轴的 min/default/max: 这三点是 avar 的不动点, 而
+    instantiateVariableFont 的 user limits 不套 avar (getGlyphSet 会套),
+    只有不动点上两条路径才一致 —— 参见 _instance 的说明。
 
     调用方 (FontMerger) 在自检失败时回退到按打底默认实例化的旧行为。
     """
+    if adv_tolerance is None:
+        adv_tolerance = tolerance
     positions = grid_positions(merged, max_positions=max_positions)
     if sample and len(added_glyphs) > sample:
         step = max(1, len(added_glyphs) // sample)
@@ -415,35 +433,35 @@ def verify_composition(merged, main_font, base_font, added_glyphs, sample=30,
 
     worst = 0.0
     checked = 0
+    # 用 glyphSet(location=用户坐标) 而不是 instantiateVariableFont: 前者与
+    # 渲染一致 (会套 avar, 见 _instance 的说明), 且宽度天然带上 HVAR 的变化。
     for pos in positions:
         label = _label(pos, merged)
-        inst_merged = _instance(merged, pos)
-        inst_base = _instance(base_font, pos)
-        inst_main = _instance(main_font, pos)
-        sets = (inst_merged.getGlyphSet(), inst_base.getGlyphSet(),
-                inst_main.getGlyphSet())
+        sets = (merged.getGlyphSet(location=pos),
+                base_font.getGlyphSet(location=pos),
+                main_font.getGlyphSet(location=pos))
         for gn in added_glyphs:
             if gn not in sets[1]:
                 continue
-            ok, w = _coords_delta(_pen_value(inst_merged, gn, sets[0]),
-                                  _pen_value(inst_base, gn, sets[1]), tolerance)
+            ok, w = _coords_delta(_pen(gn, sets[0]), _pen(gn, sets[1]),
+                                 tolerance)
             worst = max(worst, w)
             checked += 1
             if not ok:
                 raise AssertionError(
                     "合成自检失败 (%s): 新增字形 %s 与打底实例不一致 (最大偏差 %s)"
                     % (label, gn, w))
-            adv_m = inst_merged["hmtx"][gn][0]
-            adv_b = inst_base["hmtx"][gn][0]
-            if abs(adv_m - adv_b) > tolerance:
+            adv_m = sets[0][gn].width
+            adv_b = sets[1][gn].width
+            if abs(adv_m - adv_b) > adv_tolerance:
                 raise AssertionError(
                     "合成自检失败 (%s): 新增字形 %s 的字宽不一致 (%s vs %s)"
                     % (label, gn, adv_m, adv_b))
         for gn in main_glyphs:
             if gn not in sets[2]:
                 continue
-            ok, w = _coords_delta(_pen_value(inst_merged, gn, sets[0]),
-                                  _pen_value(inst_main, gn, sets[2]), tolerance)
+            ok, w = _coords_delta(_pen(gn, sets[0]), _pen(gn, sets[2]),
+                                 tolerance)
             worst = max(worst, w)
             checked += 1
             if not ok:

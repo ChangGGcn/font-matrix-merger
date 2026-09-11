@@ -296,17 +296,21 @@ def merge_cff2_var_stores(main_font, base_font, main_mappings, main_tags,
     base_store = cff2_var_store(base_font)
     if main_store is None or base_store is None:
         return {"offset": 0, "main_changed": False, "columns": (0, 0)}
-    changed = list(main_tags) != list(dst_tags) or any(
-        not m.is_identity() for m in main_mappings.values())
+    # main_tags 必须是主字体**原始**的轴序 (调用方此时 fvar 已被改成合并轴空间,
+    # 不能用 fvar 反推) —— 否则 region 的轴数与 RegionAxisCount 会对不上。
+    main_tags = list(main_tags)
+    unchanged_order = main_tags == [t for t in dst_tags if t in main_tags]
+    changed = (not unchanged_order
+               or any(not m.is_identity() for m in main_mappings.values()))
+    extra = [t for t in dst_tags if t not in main_tags]
     if changed:
         reparametrize_cff2(main_font, main_mappings, main_tags, dst_tags)
         main_store = cff2_var_store(main_font)
-    elif any(tag not in main_tags for tag in dst_tags):
+    elif extra:
         # 只是尾部新增轴: 直接给每个 region 追加恒定轴 (省一次全量 blend 重写)
         from .vf_axes import _extend_region_list
 
-        _extend_region_list(main_store.VarRegionList,
-                            len(dst_tags) - len(main_tags))
+        _extend_region_list(main_store.VarRegionList, len(extra))
     union = VarStoreUnion()
     union.add(main_store)
     offset = union.add(base_store)
