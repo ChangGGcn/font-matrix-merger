@@ -288,6 +288,62 @@ def transfer_base_layout(b_inst, base_font, mappings, merged_fvar):
     return report
 
 
+def region_split_plans(src_regions, mappings, dst_tags, folded_default=False,
+                       eps=1e-4, constant_column=True):
+    """源 region 表 → 合并空间的"列计划"。
+
+    每个源 region 的 hat 分解成合并空间的若干 hat: φ_i(T(x)) = Σ_k w_k·φ_{S_k}(x) + C
+    (folded_default=True 时丢掉 C, 表示调用方已把默认点贡献并进静态值)。
+
+    Args:
+        folded_default: 常数 C 是否已经由调用方并进静态值 (True 时完全不出现)
+        constant_column: False 时把 C 放进返回的 constants 列表 (调用方自己折进
+            静态值 —— CFF2 的 blend 默认操作数就是静态值), True 时用一个峰值
+            全 0 的"恒定 region"列承载 (GPOS 的 VariationIndex 只能用后者)。
+
+    Returns:
+        (plans, new_regions, constants) —— plans[i] = [(新 region 下标, 权重)],
+        权重之和逐点复现 φ_i(T(x)) - C; constants[i] = C_i (constant_column=True
+        且 C 已被承载时为 0); new_regions 是去重后的目标支撑表。
+    """
+    new_regions = []
+    region_index = {}
+    constants = []
+
+    def index_of(support):
+        key = tuple(sorted((tag, tuple(round(v, 9) for v in sup))
+                           for tag, sup in support.items()))
+        if key not in region_index:
+            region_index[key] = len(new_regions)
+            new_regions.append(support)
+        return region_index[key]
+
+    plans = []
+    for sup in src_regions:
+        if not sup:                       # 恒定 region: 原样保留
+            plans.append([(index_of(CONSTANT_SUPPORT), 1.0)])
+            constants.append(0.0)
+            continue
+        constant, terms = refine_support_rebased(sup, mappings, eps)
+        if folded_default:
+            constant = 0.0
+        agg = {}                          # 相同新 region 的权重先合并
+        order = []
+        for term_support, weight in terms:
+            idx = index_of(dict(term_support))
+            if idx not in agg:
+                order.append(idx)
+                agg[idx] = 0.0
+            agg[idx] += weight
+        cols = [(idx, agg[idx]) for idx in order if abs(agg[idx]) > eps]
+        if abs(constant) > eps and constant_column:
+            cols.append((index_of(CONSTANT_SUPPORT), constant))
+            constant = 0.0
+        constants.append(constant)
+        plans.append(cols)
+    return plans, new_regions, constants
+
+
 def reparametrize_var_store(var_store, mappings, src_tags, dst_tags=None,
                             folded_default=False, eps=1e-4):
     """ItemVariationStore 的 region 从源轴空间重参数化到合并轴空间 (行保持)。
@@ -323,39 +379,11 @@ def reparametrize_var_store(var_store, mappings, src_tags, dst_tags=None,
     src_regions = _store_region_supports(var_store, src_tags)
     report["regions"] = len(src_regions)
 
-    new_regions = []
-    region_index = {}
-
-    def index_of(support):
-        key = tuple(sorted((tag, tuple(round(v, 9) for v in sup))
-                           for tag, sup in support.items()))
-        if key not in region_index:
-            region_index[key] = len(new_regions)
-            new_regions.append(support)
-        return region_index[key]
-
-    # 每个源 region 的"新列计划": (新 region 下标, 权重) 列表
-    plans = []
-    for sup in src_regions:
-        if not sup:                       # 恒定 region: 原样保留
-            plans.append([(index_of(CONSTANT_SUPPORT), 1.0)])
-            continue
-        constant, terms = refine_support_rebased(sup, mappings, eps)
-        if folded_default:
-            constant = 0.0
-        agg = {}                          # 相同新 region 的权重先合并
-        order = []
-        for term_support, weight in terms:
-            idx = index_of(dict(term_support))
-            if idx not in agg:
-                order.append(idx)
-                agg[idx] = 0.0
-            agg[idx] += weight
-        cols = [(idx, agg[idx]) for idx in order if abs(agg[idx]) > eps]
-        if abs(constant) > eps:
-            cols.append((index_of(CONSTANT_SUPPORT), constant))
-            report["constant"] = True
-        plans.append(cols)
+    plans, new_regions, constants = region_split_plans(
+        src_regions, mappings, dst_tags, folded_default=folded_default, eps=eps)
+    # 恒定项: 要么留在 constants (调用方自己折), 要么已由"恒定 region"列承载
+    report["constant"] = (any(abs(c) > eps for c in constants)
+                          or any(not region for region in new_regions))
 
     new_var_data = []
     for vd in var_store.VarData:
