@@ -32,7 +32,7 @@ def complete_vf_name_table(font, platformID=3, platEncID=1, langID=0x409):
     default_sub = name.getDebugName(2) or "Regular"
     ps_name = name.getDebugName(6)
 
-    # PS 名前缀: 去掉 "-<默认子族名>" (OpenAISansJPVariable-Regular → OpenAISansJPVariable)
+    # PS 名前缀: 去掉 "-<默认子族名>" (例: MyFontVariable-Regular → MyFontVariable)
     sub_nospace = default_sub.replace(" ", "")
     prefix = ps_name or ""
     if ps_name and sub_nospace and ps_name.endswith("-" + sub_nospace):
