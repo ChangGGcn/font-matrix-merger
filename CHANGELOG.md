@@ -16,6 +16,7 @@ All notable changes to **font-matrix-merger** are documented in this file.
 
 #### Changed
 - Source-only release archives now include `CHANGELOG.md`.
+- The READMEs no longer name any specific typeface (CLI sample paths and the `merge_subsets` output name are neutral placeholders), and test comments/docstrings no longer hard-code licensed font paths: every licensed font is resolved through the non-committed `tests/local_fonts.py` (the `vf_ttf_cjk` role was added to the template).
 
 #### Fixed
 - Documentation and test comments no longer mislabel a commercially licensed third-party test font as an OFL Google Font, and the composition example uses neutral placeholder file names instead of naming licensed fonts.
@@ -27,6 +28,7 @@ All notable changes to **font-matrix-merger** are documented in this file.
 
 #### 变更
 - 仅源码发布包开始包含 `CHANGELOG.md`。
+- 两个 README 不再出现任何具体字体名（CLI 样例路径与 `merge_subsets` 输出名改为中性占位）；测试注释/docstring 不再硬编码授权字体路径——所有授权字体统一经不入库的 `tests/local_fonts.py` 解析（模板新增 `vf_ttf_cjk` 角色）。
 
 #### 修复
 - 文档与测试注释不再把某个商业授权的第三方测试字体误标为 OFL / Google Fonts；合成示例改用中性占位文件名，不再点名授权字体。
