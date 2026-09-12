@@ -61,7 +61,7 @@ FontMerger/
 | **Fast glyf injection** | `glyf` + `glyf` merges copy glyphs object by object instead of round-tripping the whole font through TTX (adding 135 glyphs to a 25k-glyph font: 153 s → 3.7 s); CFF/CFF2/CID keep the TTX pipeline |
 | **Naming** | Output family `<main font> mod`, copyrights merged with `^n^n` separators |
 
-### Merge matrix (5×5)
+### Merge matrix (4×4)
 
 Main and base fonts are each classified as `static/variable × OTF/TTF` — 16 semantic combinations. **Rows = main font type, columns = base font type.**
 
