@@ -29,6 +29,24 @@ samples/
 render_out/
 matrix_out/
 
+# === 字体二进制：一律不入库 (仓库只放源码；release 资产另行打包) ===
+# 部分测试字体是商用授权/体积很大, 误提交代价高, 这里按扩展名全拦
+*.ttf
+*.otf
+*.ttc
+*.otc
+*.woff
+*.woff2
+*.eot
+*.dfont
+*.pfb
+*.pfa
+*.pfr
+*.bdf
+*.pcf
+# fontTools TTX 中间产物 (体积大且可再生)
+*.ttx
+
 # 本地字体路径配置（含商业授权字体文件名，不入库）
 tests/local_fonts.py
 

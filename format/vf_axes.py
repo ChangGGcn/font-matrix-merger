@@ -77,16 +77,24 @@ def union_axes(main_font, base_font):
 
 
 def _extend_avar_axes(font, n_new_axes):
-    """avar 表: 新轴追加空 SegmentMap (恒等映射)"""
+    """avar 表: 新轴追加恒等 SegmentMap。
+
+    注意 table__a_v_a_r.compile 是**按 fvar 轴序取 self.segments[axis]** 重建
+    SegmentMap 的, 直接改 self.table.AxisSegmentMap 不生效 —— 必须同时写
+    segments (否则保存时 KeyError: '<新轴 tag>')。
+    """
     if "avar" not in font:
         return
-    av = font["avar"].table
+    av = font["avar"]
     from fontTools.ttLib.tables.otTables import AxisSegmentMap
-    av.AxisCount += n_new_axes
+    av.table.AxisCount += n_new_axes
     for _ in range(n_new_axes):
         seg = AxisSegmentMap()
         seg.PositionMap = []
-        av.AxisSegmentMap.append(seg)
+        av.table.AxisSegmentMap.append(seg)
+    axes = [a.axisTag for a in font["fvar"].axes]
+    for axis in axes[-n_new_axes:] if n_new_axes else []:
+        av.segments.setdefault(axis, {-1.0: -1.0, 0.0: 0.0, 1.0: 1.0})
 
 
 def _extend_varstore_regions(font, n_new_axes):

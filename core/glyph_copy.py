@@ -153,11 +153,126 @@ def inject_glyphs_xml(main_ttx, base_ttx, output_ttx, glyph_names):
     with open(output_ttx, "w", encoding="utf-8") as f:
         f.write(xml_str)
 
+    # 返回最终字形序: 二进制里 GID 顺序 == TTX 的 GlyphOrder 顺序,
+    # 编译回来后要据此恢复字形名 (post 3.0 的二进制不存名字)
+    if go_elem is not None:
+        return [e.get("name") for e in go_elem.findall("GlyphID")]
+    return None
 
-def merge_glyphs_via_ttx(main_font, base_font, glyphs_to_add):
-    """通过 TTX XML roundtrip 合并字形 (最可靠方法)"""
+
+#: HVAR/VVAR 里按字形索引的 DeltaSetIndexMap (preWrite 要求覆盖全部字形)
+_VARIATION_MAPS = ("AdvWidthMap", "LsbMap", "RsbMap",
+                   "AdvHeightMap", "TsbMap", "BsbMap", "VOrgMap")
+
+
+def _extend_variation_maps(font, glyph_names):
+    """给 HVAR/VVAR 的 DeltaSetIndexMap 补上新字形 (无变化索引)。"""
+    from fontTools.ttLib.tables.otTables import NO_VARIATION_INDEX
+
+    for tag in ("HVAR", "VVAR"):
+        if tag not in font:
+            continue
+        table = font[tag].table
+        for attr in _VARIATION_MAPS:
+            m = getattr(table, attr, None)
+            if m is None or not hasattr(m, "mapping"):
+                continue
+            for gn in glyph_names:
+                m.mapping.setdefault(gn, NO_VARIATION_INDEX)
+
+
+def merge_glyphs_object(main_font, base_font, glyphs_to_add):
+    """对象级逐字形复制 (仅 glyf 轮廓), 等价于 TTX 往返但快几个数量级。
+
+    整字体 TTX 往返的代价与字体规模成正比: 给 25k 字形的字体加 135 个字形
+    也要序列化/编译整个字体 (实测约 150 秒)。glyf 路径直接搬对象即可:
+
+      * glyf: 深拷贝字形, 复合组件按名解析 (打底字形名即最终名);
+        组件既不在主字体也不在待加集合 → 跳过该字形 (否则编译时才炸);
+      * hmtx/vmtx: 逐字形复制;
+      * gvar: 逐字形复制增量 (打底静态时无增量);
+      * HVAR/VVAR: DeltaSetIndexMap 补 NO_VARIATION_INDEX;
+      * cmap: 按 (platformID, platEncID) 并集, 缺子表则新建。
+
+    CFF/CFF2/CID 仍走 TTX 方案 (:func:`merge_glyphs_via_ttx`)。
+    """
+    result = copy.deepcopy(main_font)
+    for tag in ("glyf", "hmtx", "vmtx", "gvar", "cmap", "HVAR", "VVAR"):
+        if tag in result:
+            result[tag]
+    result["glyf"].ensureDecompiled()
+    if "glyf" in base_font:
+        base_font["glyf"].ensureDecompiled()
+
+    order = list(result.getGlyphOrder())
+    known = set(order)
+    base_order = list(base_font.getGlyphOrder())
+    base_names = set(base_order)
+
+    # 组件闭包: 复合字形的组件也必须在合并结果里 (组件名已在主字体中的除外,
+    # 它们直接解析到主字体的同名字形)。只按名取用会漏掉"被码位冲突删掉组件"
+    # 的那批复合字形 —— 旧 TTX 路径此时会在编译期报 KeyError 并整体放弃。
+    include = {gn for gn in glyphs_to_add
+               if gn in base_names and gn != ".notdef" and gn not in known}
+    changed = True
+    while changed:
+        changed = False
+        for gn in list(include):
+            glyph = base_font["glyf"][gn]
+            if not glyph.isComposite():
+                continue
+            for comp in glyph.components:
+                cname = comp.glyphName
+                if cname in base_names and cname not in include and cname not in known:
+                    include.add(cname)
+                    changed = True
+    # 保持打底字体的 GID 顺序 (Coverage/并行数组同序的前提)
+    ordered = [gn for gn in base_order
+               if gn in include and gn not in known]
+
+    added = []
+    for gn in ordered:
+        glyph = copy.deepcopy(base_font["glyf"][gn])
+        result["glyf"][gn] = glyph
+        result["hmtx"][gn] = base_font["hmtx"][gn]
+        if "vmtx" in result:
+            # 主字体有 vmtx 时, 每个字形都必须有纵向度量, 否则编译期 KeyError。
+            # 打底没有该条目 (如拉丁字体无边表) → 补 (0,0), 与 TTX 路径一致。
+            if "vmtx" in base_font and gn in base_font["vmtx"].metrics:
+                result["vmtx"][gn] = base_font["vmtx"][gn]
+            else:
+                result["vmtx"][gn] = (0, 0)
+        if "gvar" in base_font and "gvar" in result:
+            variations = base_font["gvar"].variations.get(gn)
+            if variations:
+                result["gvar"].variations[gn] = copy.deepcopy(variations)
+        order.append(gn)
+        known.add(gn)
+        added.append(gn)
+    result.setGlyphOrder(order)
+    if "maxp" in result:
+        result["maxp"].numGlyphs = len(order)
+    _extend_variation_maps(result, added)
+    _copy_cmap_mappings(result, base_font, added)
+    return result
+
+
+def merge_glyphs_via_ttx(main_font, base_font, glyphs_to_add, use_ttx=None):
+    """合并打底字形。
+
+    glyf 轮廓走对象级复制 (:func:`merge_glyphs_object`), CFF/CFF2 走
+    TTX XML 往返 (CID-keyed CFF 只有这条路可靠)。
+
+    Args:
+        use_ttx: None = 按字体类型自动选择; True/False = 强制
+    """
     if not glyphs_to_add:
         return copy.deepcopy(main_font)
+
+    if use_ttx is None:
+        use_ttx = is_cff(main_font) or is_cff(base_font)
+    if not use_ttx and "glyf" in main_font and "glyf" in base_font:
+        return merge_glyphs_object(main_font, base_font, glyphs_to_add)
 
     tmpdir = tempfile.mkdtemp(prefix="fontmerge_")
     atexit.register(lambda: _rmtree(tmpdir))
@@ -179,7 +294,8 @@ def merge_glyphs_via_ttx(main_font, base_font, glyphs_to_add):
         main_font.saveXML(main_ttx)
         base_stripped.saveXML(base_ttx)
 
-        inject_glyphs_xml(main_ttx, base_ttx, merged_ttx, glyphs_to_add)
+        intended_order = inject_glyphs_xml(main_ttx, base_ttx, merged_ttx,
+                                           glyphs_to_add)
 
         subprocess.run(
             [sys.executable, "-m", "fontTools", "ttx",
@@ -188,6 +304,13 @@ def merge_glyphs_via_ttx(main_font, base_font, glyphs_to_add):
         )
 
         result = TTFont(merged_bin)
+
+        # post 3.0 (pyftsubset 常见) 的二进制**不保存字形名**: fontTools 载入时
+        # 按 cmap 反推 —— 刚注入的字形此刻还没有 cmap 条目, 名字会被重新编号,
+        # 于是布局引用与之后补写的 cmap 全部对不上 (保存时报 dangling cmap)。
+        # 二进制的 GID 顺序就是 merged.ttx 的 GlyphOrder 顺序, 按位置恢复即可。
+        if intended_order and len(intended_order) == len(result.getGlyphOrder()):
+            result.setGlyphOrder(list(intended_order))
 
         # 复制 OT 特性: 仅从主字体恢复 (打底字体的 OT 表已剥离，避免 CID/命名方案冲突)
         for tag in ("GSUB", "GPOS", "GDEF"):
@@ -203,16 +326,34 @@ def merge_glyphs_via_ttx(main_font, base_font, glyphs_to_add):
 
 
 def _copy_cmap_mappings(dst, src, glyph_names):
+    """把打底字体中新增字形的 cmap 映射并入目标字体。
+
+    目标缺同 (platformID, platEncID) 的子表时**新建**一个 —— 否则主字体只有
+    format 4 时, 打底 format 12 里的非 BMP 码位会被整个丢掉。
+    """
+    if "cmap" not in dst or "cmap" not in src:
+        return
+    from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
+
+    by_key = {}
+    for rt in dst["cmap"].tables:
+        if hasattr(rt, "cmap") and rt.cmap is not None:
+            by_key.setdefault((rt.platformID, rt.platEncID), rt)
     for table in src["cmap"].tables:
         if not (hasattr(table, "cmap") and table.cmap):
             continue
+        key = (table.platformID, table.platEncID)
+        rt = by_key.get(key)
+        if rt is None:
+            rt = CmapSubtable.newSubtable(table.format)
+            rt.platformID = table.platformID
+            rt.platEncID = table.platEncID
+            rt.language = getattr(table, "language", 0)
+            rt.cmap = {}
+            dst["cmap"].tables.append(rt)
+            by_key[key] = rt
         for cp, gn in table.cmap.items():
             if gn not in glyph_names:
                 continue
-            for rt in dst["cmap"].tables:
-                if (hasattr(rt, "cmap")
-                        and rt.format == table.format
-                        and rt.platEncID == table.platEncID
-                        and rt.platformID == table.platformID):
-                    if cp not in rt.cmap:
-                        rt.cmap[cp] = gn
+            if cp not in rt.cmap:
+                rt.cmap[cp] = gn

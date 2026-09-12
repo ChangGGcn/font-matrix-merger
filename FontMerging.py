@@ -16,9 +16,9 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 from FontMerger import (FontMerger, SUPPORTED_EXTS, COLLECTION_EXTS,
-                         unwrap_webfont, type_label, get_copyrights,
+                         load_font, type_label, get_copyrights,
                          get_family, apply_naming, is_cff, apply_scale_offset)
-from fontTools.ttLib import TTFont
+from FontMerger.utils.save import save_font, default_flavor_for
 import copy
 
 
@@ -94,7 +94,7 @@ def run():
     for path, sc, of in inputs:
         ext = Path(path).suffix.lower()
         print(f"  {path}")
-        f = unwrap_webfont(path) if ext in (".woff", ".woff2") else TTFont(path)
+        f = load_font(path)
         # 缩放倍率 + 基线偏移 (Logic.md 通用步骤: 关于 (0,0) 点)
         if sc != 100.0 or of != 0.0:
             print(f"    缩放 {sc}% / 基线偏移 {of:+.1f}")
@@ -146,8 +146,9 @@ def run():
         out = do
 
     try:
-        cur.save(out)
-        print(f"\n完成! {out}")
+        # 统一走保存防护: 清 flavor + 校验 sfnt 魔数 (避免写出"名为 .ttf 的 woff2")
+        _, magic = save_font(cur, out, flavor=default_flavor_for(out))
+        print(f"\n完成! {out}  [{magic!r}]")
         print(f"  {type_label(cur)}, {len(cur.getGlyphOrder())} 字形")
     except Exception as e:
         print(f"\n保存失败: {e}")

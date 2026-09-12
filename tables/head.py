@@ -35,3 +35,14 @@ def merge_head(merged, main, bases, added=None):
     if base_hs:
         h.lowestRecPPEM = max_val([main_h.lowestRecPPEM] +
                                   [bh.lowestRecPPEM for bh in base_hs])
+
+
+def fix_head_flags(font):
+    """清除 head.flags 里的 WOFF2 残留位。
+
+    来自 web 字体 (woff2) 的分片会带上 bit 11 "lossless compressed";
+    桌面字体应为 bits 0+1 (基线在 y=0、LSB 在 x=0)。
+    """
+    if "head" in font:
+        font["head"].flags = (font["head"].flags & ~0x0800) | 0x0003
+    return font
