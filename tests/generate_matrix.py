@@ -3,11 +3,11 @@
 
 v2 (真路径版): C/D 组直接传原始 VF, 保留可变性输出 + Axis 并集。
 
-字体说明:
-- OFL 公开字体 (LibreCaslonText / LXGW WenKai TC / Source Serif / Source Han / Zed Text)
-  直接按文件名定位 (目录位于仓库外, 本地需自备)。
-- 商业授权字体 (CJK 静态/可变等) 路径通过 tests/local_fonts.py 配置 (该文件不入库);
-  任一字体缺失时本脚本整体跳过并打印缺失项。
+字体说明 (仓库不分发任何字体文件, 全部需本地自备, 目录位于仓库外):
+- 公开 OFL 字体 (Libre Caslon Text / LXGW WenKai TC / Source Serif / Source Han)
+  可从各自上游自由下载, 直接按文件名定位。
+- 商业授权字体 (Zed Text 等) 需自行购买授权; 其路径也可通过 tests/local_fonts.py
+  配置 (该文件不入库)。任一字体缺失时本脚本整体跳过并打印缺失项。
 """
 import os, sys, copy, time
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -21,12 +21,13 @@ sys.path.insert(0, _repo_dir)   # 使 tests.local_fonts 在"直接运行脚本"�
 from FontMerger import *
 from fontTools.ttLib import TTFont
 
-#: 公开 OFL 字体: 角色 -> 相对 _test_dir 的路径 (可给多个候选名)
+#: 本地自备字体: 角色 -> 相对 _test_dir 的路径 (公开 OFL 或本机已购授权; 缺失即 SKIP)
 OPEN_FONTS = {
     "sOTF_latin":  "OpenType/LibreCaslonText-Regular.otf",
     "sTTF_latin":  "TrueType/LXGWWenKaiTC-Regular.ttf",
     "vOTF_serif":  "otf_variable_fonts/SourceSerif4Variable-Roman.otf",
     "vOTF_cjk_jp": "otf_variable_fonts/SourceHanSansJP-VF.otf",
+    # 商业授权 (Zed Text, Typotheque): 需自行购买, 仅本地自备
     "vTTF_cjk":    ("ttf_variable_fonts/ZedTextSCVF.ttf",
                     "ttf_variable_fonts/ZedTextJapaneseVF.ttf"),
 }

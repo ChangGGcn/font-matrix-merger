@@ -220,7 +220,7 @@ are the ones recommended for "most faithful to the designer's intent":
 ```python
 # Cross-design-space merge: base contributes base-only axes and its own avar
 merger = FontMerger(compose_variations=True, compose_range="main+extra", avar_mode=0)
-r = merger.merge_two("ZedText-VF.ttf", "InterVariable.ttf")
+r = merger.merge_two("Main-VF.ttf", "Base-VF.ttf")
 ```
 
 ### Merging same-source webfont subsets (`merge_subsets`)
@@ -257,7 +257,7 @@ merged = merge_subsets(paths, out_path="Merged.ttf", tag="ja", verify=True)
 
 ### Tests
 
-`tests/generate_matrix.py` generates the full 16-combination matrix; `tests/test_merger.py` (unit tests) and `tests/test_subset_merge.py` (same-source subset union) contain the test cases. The subset cases build their own fixtures with `pyftsubset` (`tests/subset_fixture.py`), so no webfont slices need to be committed. The test suite needs a local font collection (paths are resolved under `tests/../test/`) — the fonts themselves are **not redistributed** with the repository. [OFL Google Fonts](https://fonts.google.com/) typefaces used in the samples (Libre Caslon Text, LXGW WenKai TC, Source Serif/Source Han, Zed Text) can be downloaded freely; *commercially licensed* test fonts are mapped in the local, non-committed file `tests/local_fonts.py` (template: `tests/local_fonts.example.py`) and any missing font simply skips the corresponding case.
+`tests/generate_matrix.py` generates the full 16-combination matrix; `tests/test_merger.py` (unit tests) and `tests/test_subset_merge.py` (same-source subset union) contain the test cases. The subset cases build their own fixtures with `pyftsubset` (`tests/subset_fixture.py`), so no webfont slices need to be committed. The test suite needs a local font collection (paths are resolved under `tests/../test/`) — the fonts themselves are **not redistributed** with the repository. Publicly available OFL fonts can be downloaded from their upstream projects; *commercially licensed* test fonts must be supplied locally and are referenced through the non-committed `tests/local_fonts.py` (template: `tests/local_fonts.example.py`). Any missing font simply skips the corresponding case.
 
 ## Known Limitations
 
@@ -267,7 +267,7 @@ merged = merge_subsets(paths, out_path="Merged.ttf", tag="ja", verify=True)
 4. **VORG**: values are correct when instancing at the default axis position; non-default positions need recomputation.
 5. **Multi-level OT features**: a feature already merged at an earlier level is re-detected at later levels (idempotent, but lookups may become redundant).
 6. **Packaging**: the repository root is the package itself, so `pip install` from a clone is not wired up yet — clone-and-run for now; a PyPI-ready layout is planned.
-7. **Locally licensed fonts** are used only for local testing and are intentionally excluded from this repository (paths live in the non-committed `tests/local_fonts.py`); all fonts named in the documentation samples are OFL-licensed.
+7. **Licensed test fonts** are used for local testing only and are intentionally excluded from this repository (they must be supplied locally, see the non-committed `tests/local_fonts.py`); no font file is redistributed, and the documentation only names publicly available OFL fonts.
 8. **`merge_subsets()` CFF2 scope**: glyf subsets and CFF2 subsets are both supported, but CFF2 requires the slices to share the same CFF2 **VarStore and GlobalSubrs** structure (pyftsubset keeps them intact); differences in FDArray are handled by an FD-level union. If a tool rebuilt/re-numbered the CFF2 VarStore per slice, the `blend`/`vsindex` data would need to be rewritten — that path raises a clear error instead of writing a broken font. Mixed CFF/CFF2 slices are not supported.
 9. **Auto-named glyph aliasing**: subset glyphs with post-3.0 sequence names (`glyphNNNNN`) are always aliased, so a slice that keeps the same no-codepoint glyph as another slice contributes an extra (content-identical) copy; this trades a little size for never conflating two different glyphs.
 

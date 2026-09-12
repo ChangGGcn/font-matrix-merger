@@ -14,18 +14,18 @@ from FontMerger import *
 from fontTools.ttLib import TTFont
 from tests.subset_fixture import cached_subsets, cached_rich_subsets
 
-# 公开可下载的 OFL 测试字体（目录位于仓库外，本地需自备；缺失时用例自动 SKIP）
+# 本地自备测试字体（公开 OFL 或本机已购授权；目录位于仓库外，缺失时用例自动 SKIP）
 _OPEN_FONTS = {
     "otf_latin": "OpenType/LibreCaslonText-Regular.otf",
     "ttf_latin": "TrueType/LXGWWenKaiTC-Regular.ttf",
     "votf_cjk":  "otf_variable_fonts/SourceHanSansCN-VF.otf",
-    "vttf_cjk":  "ttf_variable_fonts/ZedTextJapaneseVF.ttf",
+    "vttf_cjk":  "ttf_variable_fonts/ZedTextJapaneseVF.ttf",  # 商业授权 (Zed Text)
     "ttf_inter": "TrueType/Inter-Regular.ttf",
 }
 
 
 def _open(role):
-    """公开 OFL 字体路径；文件不存在返回 None（调用方跳过用例）。"""
+    """本地自备字体路径；文件不存在返回 None（调用方跳过用例）。"""
     rel = _OPEN_FONTS.get(role)
     if not rel:
         return None
@@ -177,7 +177,7 @@ def test_high_level_api():
 
 
 def _open_vf():
-    """OFL 可变 TTF 路径 (Zed Text Japanese VF); 缺失返回 None"""
+    """本地可变 TTF 路径 (Zed Text Japanese VF, 商业授权需自备); 缺失返回 None"""
     p = _open("vttf_cjk")
     return p
 

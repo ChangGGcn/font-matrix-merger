@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """merge_subsets() 同源分片并集合并测试
 
-用例需要本地可变字体 (OFL) — 缺失时自动 SKIP:
-  test/ttf_variable_fonts/ZedTextJapaneseVF.ttf
+用例需要本地自备的可变字体 — 缺失时自动 SKIP:
+  test/ttf_variable_fonts/ZedTextJapaneseVF.ttf   (Zed Text, Typotheque 商业授权, 需自行购买)
 
 分片由 pyftsubset 现场生成 (见 tests/subset_fixture.py), 因此不依赖任何
 webfont 分片文件是否随仓库分发。
@@ -25,7 +25,7 @@ from FontMerger import (FontMerger, is_same_source, is_variable, merge_subsets,
 from FontMerger.core.verify import _check_layout_integrity
 from tests.subset_fixture import cached_subsets, cached_rich_subsets
 
-#: OFL 可变 TTF: 带 gvar/HVAR/VVAR/GDEF VarStore/vert/vrt2/kern/mark
+#: 本地可变 TTF (Zed Text, 商业授权自备): 带 gvar/HVAR/VVAR/GDEF VarStore/vert/vrt2/kern/mark
 _VF_TTF = "ttf_variable_fonts/ZedTextJapaneseVF.ttf"
 #: OFL 静态字体 (异源合并用)
 _STATIC_TTF = "TrueType/LXGWWenKaiTC-Regular.ttf"

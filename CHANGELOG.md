@@ -17,6 +17,9 @@ All notable changes to **font-matrix-merger** are documented in this file.
 #### Changed
 - Source-only release archives now include `CHANGELOG.md`.
 
+#### Fixed
+- Documentation and test comments no longer mislabel a commercially licensed third-party test font as an OFL Google Font, and the composition example uses neutral placeholder file names instead of naming licensed fonts.
+
 ### 简体中文
 
 #### 新增
@@ -24,6 +27,9 @@ All notable changes to **font-matrix-merger** are documented in this file.
 
 #### 变更
 - 仅源码发布包开始包含 `CHANGELOG.md`。
+
+#### 修复
+- 文档与测试注释不再把某个商业授权的第三方测试字体误标为 OFL / Google Fonts；合成示例改用中性占位文件名，不再点名授权字体。
 
 <!-- 新条目请按上方双语结构追加 / append new entries in the same bilingual structure -->
 

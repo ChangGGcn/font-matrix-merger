@@ -218,7 +218,7 @@ result = merge_fonts("main.otf", ["base.otf"], answers={"vOTF_sOTF": "静态"})
 ```python
 # 跨设计空间合并：打底带来自己的轴与 avar
 merger = FontMerger(compose_variations=True, compose_range="main+extra", avar_mode=0)
-r = merger.merge_two("ZedText-VF.ttf", "InterVariable.ttf")
+r = merger.merge_two("Main-VF.ttf", "Base-VF.ttf")
 ```
 
 ### 同源分片并集（`merge_subsets`）
@@ -253,7 +253,7 @@ merged = merge_subsets(paths, out_path="Merged.ttf", tag="ja", verify=True)
 
 ### 测试
 
-`tests/generate_matrix.py` 生成 16 组合完整矩阵；`tests/test_merger.py` 为单元测试，`tests/test_subset_merge.py` 覆盖同源分片并集。分片用例用 `pyftsubset` 现场生成夹具（`tests/subset_fixture.py`），不需要随仓库分发任何 webfont 分片。测试需要本地字体集（路径解析于 `tests/../test/`）——**字体本身不随仓库分发**。样例所用的 [Google Fonts OFL 字体](https://fonts.google.com/)（Libre Caslon Text、LXGW WenKai TC、Source Serif/Source Han、Zed Text）可自由下载；**商业授权**测试字体通过本地不入库文件 `tests/local_fonts.py` 映射（模板：`tests/local_fonts.example.py`），任一字体缺失时对应用例自动跳过。
+`tests/generate_matrix.py` 生成 16 组合完整矩阵；`tests/test_merger.py` 为单元测试，`tests/test_subset_merge.py` 覆盖同源分片并集。分片用例用 `pyftsubset` 现场生成夹具（`tests/subset_fixture.py`），不需要随仓库分发任何 webfont 分片。测试需要本地字体集（路径解析于 `tests/../test/`）——**字体本身不随仓库分发**。公开的 OFL 字体可自行从各自上游项目下载；**商业授权**测试字体需本地自备，并通过不入库的 `tests/local_fonts.py` 引用（模板：`tests/local_fonts.example.py`）。任一字体缺失时对应用例自动跳过。
 
 ## 已知限制
 
@@ -263,7 +263,7 @@ merged = merge_subsets(paths, out_path="Merged.ttf", tag="ja", verify=True)
 4. **VORG**：默认轴位置实例化时数值正确；非默认位置需额外重算
 5. **多级 OT 特性**：上级已并入的 feature 会在下级被重复检测（幂等，但 lookup 可能冗余）
 6. **打包**：仓库根目录即包本身，`pip install` 尚未接线——目前 clone 即用；PyPI 化目录结构在规划中
-7. **本地授权字体**仅用于本地测试，刻意不包含在本仓库中（真实路径见未入库的 `tests/local_fonts.py`）；文档样例中出现的字体均为 OFL 开源授权。
+7. **授权测试字体**仅用于本地测试，刻意不包含在本仓库中（需本地自备，见未入库的 `tests/local_fonts.py`）；仓库不分发任何字体文件，文档中只出现公开发布的 OFL 字体名。
 8. **`merge_subsets()` 的 CFF2 边界**：glyf 与 CFF2 分片都支持，但 CFF2 要求各分片共享同一 **VarStore / GlobalSubrs** 结构（pyftsubset 会原样保留）；FDArray 的差异由 FD 级并集处理。若某个工具逐分片重建/重编号了 CFF2 VarStore，则 `blend`/`vsindex` 需要重写——该路径会明确报错而不是产出坏字体。CFF 与 CFF2 混合分片不支持。
 9. **自动名字形一律加别名**：post 3.0 的序号名（`glyphNNNNN`）在分片间同名但不同源，故一律改名保留——同一无码位字形被多个分片保留时会多出一份内容相同的副本，用少量体积换取"绝不混淆两个不同字形"。
 
