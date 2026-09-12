@@ -19,7 +19,6 @@ _OPEN_FONTS = {
     "otf_latin": "OpenType/LibreCaslonText-Regular.otf",
     "ttf_latin": "TrueType/LXGWWenKaiTC-Regular.ttf",
     "votf_cjk":  "otf_variable_fonts/SourceHanSansCN-VF.otf",
-    "vttf_cjk":  "ttf_variable_fonts/ZedTextJapaneseVF.ttf",  # 商业授权 (Zed Text)
     "ttf_inter": "TrueType/Inter-Regular.ttf",
 }
 
@@ -177,9 +176,8 @@ def test_high_level_api():
 
 
 def _open_vf():
-    """本地可变 TTF 路径 (Zed Text Japanese VF, 商业授权需自备); 缺失返回 None"""
-    p = _open("vttf_cjk")
-    return p
+    """本地可变 CJK TTF (商业授权; 路径经 tests/local_fonts.py 的 "vf_ttf_cjk" 配置)。"""
+    return _local("vf_ttf_cjk")
 
 
 def _vf_subsets(n=2):
@@ -498,7 +496,7 @@ def test_generic_merge_transfers_variation():
 def test_cross_design_space_composition():
     """跨设计空间合成: 打底带主字体没有的轴时, 合并结果新增字形逐点等价。
 
-    主 = ZedText (wght), 打底 = InterVariable (opsz + wght): 合并后应有
+    主 = 本地可变 CJK 字体 (wght), 打底 = InterVariable (opsz + wght): 合并后应有
     wght(主范围) + opsz(打底范围) 两条轴; 新增字形在网格位置上等于打底在
     该位置的实例 (自检函数本身已在合并流程里跑过, 这里再抽样复核)。
     """
@@ -555,7 +553,7 @@ def test_composition_fallback():
 def test_compose_main_var_store_axes():
     """跨设计空间合成后, 主字体自己的 ItemVariationStore 必须跟上新轴空间。
 
-    主 = ZedText (wght, 带 GDEF VarStore + GPOS VariationIndex), 打底 =
+    主 = 本地可变 CJK 字体 (wght, 带 GDEF VarStore + GPOS VariationIndex), 打底 =
     InterVariable (opsz + wght)。合并后:
       * 各表 VarStore 的 RegionAxisCount == fvar 轴数 (否则写出非法字体),
         VariationIndex 的 (outer, inner) 不越界 (core.verify._check_var_stores);
@@ -632,7 +630,7 @@ def _count_var_devices(font, min_outer=0):
 def test_compose_base_layout_variation():
     """跨设计空间合成时, 打底的布局变化数据 (GDEF VarStore + GPOS 设备) 一并并入。
 
-    主 = ZedText 夹具 (wght), 打底 = InterVariable (opsz + wght)。判据:
+    主 = 本地可变 CJK 夹具 (wght), 打底 = InterVariable (opsz + wght)。判据:
       * 合并后 GDEF VarStore 的 VarData 数 = 主的 + 打底的, 且 RegionAxisCount
         与新 fvar 一致 (打底数据按合并空间重参数化, 行保持 → 设备引用有效);
       * GPOS 里出现 outer >= 主的 VarData 数的设备 (即来自打底的那部分);
@@ -682,7 +680,7 @@ def test_compose_base_layout_variation():
 def test_real_var_store_reparametrize():
     """真实 ItemVariationStore 的重参数化: 逐 (VarData, 行) 与源语义一致。
 
-    用 InterVariable 的真实 GDEF VarStore 与 ZedText×Inter 的合并轴映射,
+    用 InterVariable 的真实 GDEF VarStore 与该本地字体的合并轴映射,
     在合并空间随机采样位置 x: 重参数化后的行增量 (folded_default=True, 即
     打底静态值已折默认点后的**残余变化量**) 必须复现源语义
     Σ_c δ_c·φ_c(T(x)) - C。整数增量取整带来每列 ≤ 0.5 的误差。

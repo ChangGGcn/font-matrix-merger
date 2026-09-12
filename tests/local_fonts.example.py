@@ -21,4 +21,6 @@ LOCAL_FONTS = {
     # "symbols_otf": "otf_variable_fonts/<your_symbols>.otf",
     # 商业授权可变 TTF（拉丁 VF 样例用）
     # "vf_ttf_helvetica": "ttf_variable_fonts/<your_vf_ttf>.ttf",
+    # 商业授权可变 CJK TTF（单元测试 / 同源分片并集用例用）
+    # "vf_ttf_cjk": "ttf_variable_fonts/<your_vf_cjk>.ttf",
 }

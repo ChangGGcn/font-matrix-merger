@@ -109,26 +109,26 @@ CLI 为交互式：依次输入主字体（缩放% + 基线偏移）、任意级
 ========================================================
 
 请输入主字体（拖入文件或输入路径）:
-  主字体路径:  test/OpenType/LibreCaslonText-Regular.otf
+  主字体路径:  test/OpenType/Main-Serif.otf
   缩放倍率(%) [100]: 100
   基线偏移 [0]: 0
 第 1 级打底字体（Y 结束）:
-  路径:  test/otf_variable_fonts/SourceSerif4Variable-Roman.otf
+  路径:  test/otf_variable_fonts/Base-Serif-VF.otf
   缩放倍率(%) [100]: 100
   基线偏移 [0]: 0
 第 2 级打底字体（Y 结束）:
-  路径:  test/TrueType/LXGWWenKaiTC-Regular.ttf
+  路径:  test/TrueType/Base-CJK.ttf
   缩放倍率(%) [100]: 100
   基线偏移 [0]: 0
 第 3 级打底字体（Y 结束）:
   路径:  Y
 
 加载字体...
-  test/OpenType/LibreCaslonText-Regular.otf
+  test/OpenType/Main-Serif.otf
     静态OTF, 537 字形
-  test/otf_variable_fonts/SourceSerif4Variable-Roman.otf
+  test/otf_variable_fonts/Base-Serif-VF.otf
     可变OTF, 1464 字形
-  test/TrueType/LXGWWenKaiTC-Regular.ttf
+  test/TrueType/Base-CJK.ttf
     静态TTF, 25764 字形
 
 兼容性检查...
@@ -166,8 +166,8 @@ CLI 为交互式：依次输入主字体（缩放% + 基线偏移）、任意级
 
 处理名称...
 
-输出路径 [test/OpenType/LibreCaslonText-Regular_mod.otf]: 
-完成! test/OpenType/LibreCaslonText-Regular_mod.otf
+输出路径 [test/OpenType/Main-Serif_mod.otf]: 
+完成! test/OpenType/Main-Serif_mod.otf
   静态OTF, 26439 字形
 ```
 
@@ -233,7 +233,7 @@ from FontMerger import merge_subsets, verify_merge
 
 paths = sorted(glob("webfont/ja-v2/*.woff2"))      # subsets[0] 作基底
 
-merged = merge_subsets(paths, out_path="OpenAISansJP-Merged.ttf", tag="ja",
+merged = merge_subsets(paths, out_path="Merged-JP.ttf", tag="ja",
                        complete_name_table=True, fix_head_flags=True)
 
 # 自检: 在默认/轴两端实例化源分片与合并结果逐字形比对
@@ -258,7 +258,7 @@ merged = merge_subsets(paths, out_path="Merged.ttf", tag="ja", verify=True)
 ## 已知限制
 
 1. **JP（CID CFF2）作主字体**（矩阵 C1/D1）：合并本身成功（约 18,600~18,868 字形），但保存阶段打底拉丁字形在 cmap format 4 的引用偶发不完整；矩阵生成器降级走静态实例化路径。如需真·可变输出，需攻克 CFF2 CID 注入的更深层命名空间问题
-2. **跨设计空间的字形增量**：主/打底同为可变且**轴空间与 `avar` 完全一致**时（`axes_compatible()` 判定），打底 `gvar` 增量 1:1 搬入并用幽灵点重建 `HVAR`；轴空间不一致（轴集合/范围或 avar 不同）时走**合成**路径——由 `format/axis_mapping.py` 把打底增量重参数化到合并归一化空间，经 `verify_composition` 网格自检（容差 1 单位）通过才采用，否则透明回退到"打底按默认实例化"。该路径目前的缺口：(a) 要求主/打底的可变数据在**同一种轮廓技术**里：`glyf` 组合需要两边都有 `gvar`，CFF2 组合需要两边都有带 `VarStore` 的 `CFF2`（`glyf`↔`CFF2` 混搭、或变化数据在别的表里，仍回退实例化）；CFF2 路径里打底 `HVAR` 按字形名并入，而 `VVAR` 与 Private 的 hint 变化保持静态（hint 的 blend 折成默认值）；(b) 合并后的 `avar` 是主字体的，若主轴把某段用户区间压成归一化空间的一个点（`collapsing_flats()`），打底在该区间的增量在 OT 模型下无法逐点还原——检测到会告警并保留主字体行为（可传 `avar_mode=2` 丢弃 `avar` 以恢复打底增量，代价是改变主字体的插值）；(c) 打底的布局变化数据也会搬入（`transfer_base_layout()`：`GDEF` `ItemVariationStore` + `GPOS` `VariationIndex`），但 VariationIndex 的增量是整数，重参数化后的列要取整，所以 kerning/anchor 变化可能有至多约 1 单位的偏差（实测 UPM 1000 下 Inter 的 kerning 为 0.70 单位）——可传 `compose_layout=False` 保持旧行为（打底布局冻结在合并默认点）；(d) 主字体自己的 varStore 只在轴空间真的变化时（`compose_range="union"`/`"main"` 或 `avar_mode != 0`）才重参数化，此时默认点的那一项由"恒定 region"（全轴峰值 0）承载
+2. **跨设计空间的字形增量**：主/打底同为可变且**轴空间与 `avar` 完全一致**时（`axes_compatible()` 判定），打底 `gvar` 增量 1:1 搬入并用幽灵点重建 `HVAR`；轴空间不一致（轴集合/范围或 avar 不同）时走**合成**路径——由 `format/axis_mapping.py` 把打底增量重参数化到合并归一化空间，经 `verify_composition` 网格自检（容差 1 单位）通过才采用，否则透明回退到"打底按默认实例化"。该路径目前的缺口：(a) 要求主/打底的可变数据在**同一种轮廓技术**里：`glyf` 组合需要两边都有 `gvar`，CFF2 组合需要两边都有带 `VarStore` 的 `CFF2`（`glyf`↔`CFF2` 混搭、或变化数据在别的表里，仍回退实例化）；CFF2 路径里打底 `HVAR` 按字形名并入，而 `VVAR` 与 Private 的 hint 变化保持静态（hint 的 blend 折成默认值）；(b) 合并后的 `avar` 是主字体的，若主轴把某段用户区间压成归一化空间的一个点（`collapsing_flats()`），打底在该区间的增量在 OT 模型下无法逐点还原——检测到会告警并保留主字体行为（可传 `avar_mode=2` 丢弃 `avar` 以恢复打底增量，代价是改变主字体的插值）；(c) 打底的布局变化数据也会搬入（`transfer_base_layout()`：`GDEF` `ItemVariationStore` + `GPOS` `VariationIndex`），但 VariationIndex 的增量是整数，重参数化后的列要取整，所以 kerning/anchor 变化可能有至多约 1 单位的偏差（实测 UPM 1000 下打底字体的 kerning 偏差为 0.70 单位）——可传 `compose_layout=False` 保持旧行为（打底布局冻结在合并默认点）；(d) 主字体自己的 varStore 只在轴空间真的变化时（`compose_range="union"`/`"main"` 或 `avar_mode != 0`）才重参数化，此时默认点的那一项由"恒定 region"（全轴峰值 0）承载
 3. **OpenType 特性**：追加的打底 feature 所引用字形必须存在于主字体（否则跳过该 lookup）。同 tag feature 并成一条记录；打底 Script/LangSys 一并并入（否则追加的 feature 不可达）；FeatureList 重排后重写 `FeatureVariations` 的 FeatureIndex（表本身保留，无法映射的记录才会被丢）；GDEF `GlyphClassDef`/`MarkAttachClassDef`/`MarkGlyphSetsDef` 与 `ItemVariationStore` 均取并集，并重映射 `LookupFlag` bit4 的 `MarkFilteringSet`。异源路径不并入**打底字体自己的** `FeatureVariations`（只保留主字体的）
 4. **VORG**：默认轴位置实例化时数值正确；非默认位置需额外重算
 5. **多级 OT 特性**：上级已并入的 feature 会在下级被重复检测（幂等，但 lookup 可能冗余）

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """merge_subsets() 同源分片并集合并测试
 
-用例需要本地自备的可变字体 — 缺失时自动 SKIP:
-  test/ttf_variable_fonts/ZedTextJapaneseVF.ttf   (Zed Text, Typotheque 商业授权, 需自行购买)
+用例需要一个本地自备的商业授权可变 CJK 字体 — 缺失时自动 SKIP:
+  路径经 tests/local_fonts.py 的角色 "vf_ttf_cjk" 配置 (该文件不入库)。
 
 分片由 pyftsubset 现场生成 (见 tests/subset_fixture.py), 因此不依赖任何
 webfont 分片文件是否随仓库分发。
@@ -25,8 +25,9 @@ from FontMerger import (FontMerger, is_same_source, is_variable, merge_subsets,
 from FontMerger.core.verify import _check_layout_integrity
 from tests.subset_fixture import cached_subsets, cached_rich_subsets
 
-#: 本地可变 TTF (Zed Text, 商业授权自备): 带 gvar/HVAR/VVAR/GDEF VarStore/vert/vrt2/kern/mark
-_VF_TTF = "ttf_variable_fonts/ZedTextJapaneseVF.ttf"
+#: 本地可变 CJK TTF (商业授权; 经 tests/local_fonts.py 的 "vf_ttf_cjk" 角色配置):
+#: 带 gvar/HVAR/VVAR/GDEF VarStore/vert/vrt2/kern/mark
+_VF_ROLE = "vf_ttf_cjk"
 #: OFL 静态字体 (异源合并用)
 _STATIC_TTF = "TrueType/LXGWWenKaiTC-Regular.ttf"
 #: OFL CFF2 可变字体 (CFF2 分片并集用)
@@ -34,7 +35,15 @@ _CFF2_VF = "otf_variable_fonts/SourceSerif4Variable-Roman.otf"
 
 
 def _vf():
-    p = os.path.join(_test_fonts_dir, _VF_TTF)
+    """本地授权可变 CJK 字体路径 (tests/local_fonts.py 配置); 未配置/不存在返回 None"""
+    try:
+        from tests.local_fonts import LOCAL_FONTS
+        rel = LOCAL_FONTS.get(_VF_ROLE)
+    except ImportError:
+        rel = None
+    if not rel:
+        return None
+    p = os.path.join(_test_fonts_dir, rel)
     return p if os.path.exists(p) else None
 
 

@@ -109,26 +109,26 @@ The CLI is interactive: enter the main font path (plus scale % and baseline offs
 ========================================================
 
 请输入主字体（拖入文件或输入路径）:
-  主字体路径:  test/OpenType/LibreCaslonText-Regular.otf
+  主字体路径:  test/OpenType/Main-Serif.otf
   缩放倍率(%) [100]: 100
   基线偏移 [0]: 0
 第 1 级打底字体（Y 结束）:
-  路径:  test/otf_variable_fonts/SourceSerif4Variable-Roman.otf
+  路径:  test/otf_variable_fonts/Base-Serif-VF.otf
   缩放倍率(%) [100]: 100
   基线偏移 [0]: 0
 第 2 级打底字体（Y 结束）:
-  路径:  test/TrueType/LXGWWenKaiTC-Regular.ttf
+  路径:  test/TrueType/Base-CJK.ttf
   缩放倍率(%) [100]: 100
   基线偏移 [0]: 0
 第 3 级打底字体（Y 结束）:
   路径:  Y
 
 加载字体...
-  test/OpenType/LibreCaslonText-Regular.otf
+  test/OpenType/Main-Serif.otf
     静态OTF, 537 字形
-  test/otf_variable_fonts/SourceSerif4Variable-Roman.otf
+  test/otf_variable_fonts/Base-Serif-VF.otf
     可变OTF, 1464 字形
-  test/TrueType/LXGWWenKaiTC-Regular.ttf
+  test/TrueType/Base-CJK.ttf
     静态TTF, 25764 字形
 
 兼容性检查...
@@ -166,8 +166,8 @@ The CLI is interactive: enter the main font path (plus scale % and baseline offs
 
 处理名称...
 
-输出路径 [test/OpenType/LibreCaslonText-Regular_mod.otf]: 
-完成! test/OpenType/LibreCaslonText-Regular_mod.otf
+输出路径 [test/OpenType/Main-Serif_mod.otf]: 
+完成! test/OpenType/Main-Serif_mod.otf
   静态OTF, 26439 字形
 ```
 
@@ -237,7 +237,7 @@ from FontMerger import merge_subsets, verify_merge
 
 paths = sorted(glob("webfont/ja-v2/*.woff2"))      # subsets[0] is the base
 
-merged = merge_subsets(paths, out_path="OpenAISansJP-Merged.ttf", tag="ja",
+merged = merge_subsets(paths, out_path="Merged-JP.ttf", tag="ja",
                        complete_name_table=True, fix_head_flags=True)
 
 # self-check: instance sources + result at the default/min/max axis positions
@@ -262,7 +262,7 @@ merged = merge_subsets(paths, out_path="Merged.ttf", tag="ja", verify=True)
 ## Known Limitations
 
 1. **JP (CID CFF2) as the main font** (matrix cells C1/D1): the merge itself succeeds (~18,600–18,868 glyphs), but the save stage can leave incomplete cmap format-4 references for base Latin glyphs; the matrix generator falls back to a static-instanced path. A true variable output requires solving deeper CFF2 CID namespace issues.
-2. **Base-glyph variation across design spaces**: when main and base are both variable and share the same axis space and `avar`, the base glyphs' `gvar` deltas are transferred 1:1 and `HVAR` is rebuilt from the phantom points (`axes_compatible()`). When the design spaces differ (different axis sets/ranges or a different `avar`), the base deltas are **composed** — re-parameterized into the merged normalized space by `format/axis_mapping.py` — and the result is accepted only if the `verify_composition` grid check passes (tolerance 1 unit), otherwise the merge transparently falls back to instancing the base at its default. Remaining gaps in this path: (a) it needs **both** fonts to be variable in the same outline technology — `glyf`+`gvar` compositions need `gvar` on both sides, CFF2 compositions need `CFF2` with a `VarStore` on both sides (a `glyf`↔`CFF2` mix, or a base whose variation lives in another table, still falls back to instancing); for CFF2 the base's `HVAR` is merged by glyph name while `VVAR`/private hint variation stays static (hint blends are folded to their default values); (b) the merged `avar` is the main font's, so an axis range that the main font compresses to a single normalized point (`collapsing_flats()`) cannot keep the base's variation across that interval — the merger detects this, warns, and keeps the main behaviour (pass `avar_mode=2` to drop `avar` entirely and recover the base's variation, at the cost of changing the main font's interpolation); (c) layout variation of the base is transferred as well (`GDEF` `ItemVariationStore` + `GPOS` `VariationIndex`, via `transfer_base_layout()`), but since `VariationIndex` deltas are integers the re-parameterized columns are rounded, so kerning/anchor variation can deviate by up to ~1 unit (measured 0.70 units on Inter's kerning at UPM 1000) — set `compose_layout=False` to keep the old behaviour (base layout frozen at the merged default); (d) the main font's own var stores are only re-parameterized when the axis space actually changes (`compose_range="union"`/`"main"` or `avar_mode != 0`), where the default-location term has to be carried by a constant (peak-0) region.
+2. **Base-glyph variation across design spaces**: when main and base are both variable and share the same axis space and `avar`, the base glyphs' `gvar` deltas are transferred 1:1 and `HVAR` is rebuilt from the phantom points (`axes_compatible()`). When the design spaces differ (different axis sets/ranges or a different `avar`), the base deltas are **composed** — re-parameterized into the merged normalized space by `format/axis_mapping.py` — and the result is accepted only if the `verify_composition` grid check passes (tolerance 1 unit), otherwise the merge transparently falls back to instancing the base at its default. Remaining gaps in this path: (a) it needs **both** fonts to be variable in the same outline technology — `glyf`+`gvar` compositions need `gvar` on both sides, CFF2 compositions need `CFF2` with a `VarStore` on both sides (a `glyf`↔`CFF2` mix, or a base whose variation lives in another table, still falls back to instancing); for CFF2 the base's `HVAR` is merged by glyph name while `VVAR`/private hint variation stays static (hint blends are folded to their default values); (b) the merged `avar` is the main font's, so an axis range that the main font compresses to a single normalized point (`collapsing_flats()`) cannot keep the base's variation across that interval — the merger detects this, warns, and keeps the main behaviour (pass `avar_mode=2` to drop `avar` entirely and recover the base's variation, at the cost of changing the main font's interpolation); (c) layout variation of the base is transferred as well (`GDEF` `ItemVariationStore` + `GPOS` `VariationIndex`, via `transfer_base_layout()`), but since `VariationIndex` deltas are integers the re-parameterized columns are rounded, so kerning/anchor variation can deviate by up to ~1 unit (measured 0.70 units of kerning variation at UPM 1000) — set `compose_layout=False` to keep the old behaviour (base layout frozen at the merged default); (d) the main font's own var stores are only re-parameterized when the axis space actually changes (`compose_range="union"`/`"main"` or `avar_mode != 0`), where the default-location term has to be carried by a constant (peak-0) region.
 3. **OpenType features**: appended base features are merged only if all referenced glyphs exist in the main font (otherwise the lookup is skipped). Same-tag features are unioned into one record, base scripts/lang-systems are merged so the appended features stay reachable, `FeatureVariations` feature indices are rewritten after the re-sort (the table itself is preserved; records whose index cannot be mapped are dropped), and GDEF `GlyphClassDef`/`MarkAttachClassDef`/`MarkGlyphSetsDef` plus the `ItemVariationStore` take the union with `LookupFlag` bit4 `MarkFilteringSet` indices remapped. Base-font `FeatureVariations` are not merged in the heterogeneous path (only the main font's are preserved).
 4. **VORG**: values are correct when instancing at the default axis position; non-default positions need recomputation.
 5. **Multi-level OT features**: a feature already merged at an earlier level is re-detected at later levels (idempotent, but lookups may become redundant).

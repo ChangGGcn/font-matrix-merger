@@ -6,8 +6,8 @@ v2 (真路径版): C/D 组直接传原始 VF, 保留可变性输出 + Axis 并�
 字体说明 (仓库不分发任何字体文件, 全部需本地自备, 目录位于仓库外):
 - 公开 OFL 字体 (Libre Caslon Text / LXGW WenKai TC / Source Serif / Source Han)
   可从各自上游自由下载, 直接按文件名定位。
-- 商业授权字体 (Zed Text 等) 需自行购买授权; 其路径也可通过 tests/local_fonts.py
-  配置 (该文件不入库)。任一字体缺失时本脚本整体跳过并打印缺失项。
+- 商业授权字体一律通过 tests/local_fonts.py 配置 (该文件不入库; 模板见
+  tests/local_fonts.example.py)。任一字体缺失时本脚本整体跳过并打印缺失项。
 """
 import os, sys, copy, time
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -27,9 +27,6 @@ OPEN_FONTS = {
     "sTTF_latin":  "TrueType/LXGWWenKaiTC-Regular.ttf",
     "vOTF_serif":  "otf_variable_fonts/SourceSerif4Variable-Roman.otf",
     "vOTF_cjk_jp": "otf_variable_fonts/SourceHanSansJP-VF.otf",
-    # 商业授权 (Zed Text, Typotheque): 需自行购买, 仅本地自备
-    "vTTF_cjk":    ("ttf_variable_fonts/ZedTextSCVF.ttf",
-                    "ttf_variable_fonts/ZedTextJapaneseVF.ttf"),
 }
 
 #: 本地授权字体角色 (真实路径见 tests/local_fonts.py, 未配置时 None)
