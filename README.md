@@ -13,6 +13,8 @@
 
 The library is built on top of [**FontTools**](https://github.com/fonttools/fonttools) (MIT) — used for all glyph/table-level manipulation, CFF/CFF2 conversion, varLib instancing and subsetting — and follows the conventions of [**AFDKO**](https://github.com/adobe-type-tools/afdko) (Adobe Font Development Kit for OpenType, Apache-2.0), which is bundled in the project's PyInstaller build pipeline and referenced for its CID-keyed UFO / CIDMap remapping approach.
 
+Release history (bilingual English / 简体中文): **[CHANGELOG.md](CHANGELOG.md)**.
+
 Key highlights:
 
 - **16-way merge matrix**: `merge_two()` auto-dispatches to the right strategy for any main/base combination.
@@ -32,6 +34,7 @@ Key highlights:
 FontMerger/
 ├── FontMerging.py           # Interactive CLI entry point
 ├── __init__.py              # Public API exports
+├── CHANGELOG.md             # Release history (bilingual EN / 简体中文)
 ├── core/                    # 16-way dispatch, TTX glyph injection, conflict & naming
 ├── format/                  # static extraction, CFF↔glyf, CID, axis union, transform, subset, webfont
 ├── tables/                  # per-table merge registry + GSUB/GPOS/GDEF merge

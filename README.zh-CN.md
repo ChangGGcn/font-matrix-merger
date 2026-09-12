@@ -13,6 +13,8 @@
 
 本库构建于 [**FontTools**](https://github.com/fonttools/fonttools)（MIT 协议）之上——负责全部字形/表级操作、CFF/CFF2 转换、varLib 实例化与子集化；并遵循 [**AFDKO**](https://github.com/adobe-type-tools/afdko)（Adobe Font Development Kit for OpenType，Apache-2.0）的规范——AFDKO 被打包进本项目的 PyInstaller 构建管线，其 CIDKeyed UFO / CIDMap 重映射思路是 CID 合并实现的重要参考。
 
+发布历史（中英双语）：**[CHANGELOG.md](CHANGELOG.md)**。
+
 核心亮点：
 
 - **16 路合并矩阵**：`merge_two()` 对任意主/打底组合自动分派正确策略。
@@ -32,6 +34,7 @@
 FontMerger/
 ├── FontMerging.py           # 交互式 CLI 主入口
 ├── __init__.py              # 公共 API 导出
+├── CHANGELOG.md             # 发布历史（中英双语）
 ├── core/                    # 16 路分派、TTX 字形注入、冲突检测、命名
 ├── format/                  # 静态提取、CFF↔glyf、CID、Axis 并集、变换、子集、webfont
 ├── tables/                  # 逐表合并注册表 + GSUB/GPOS/GDEF 合并
