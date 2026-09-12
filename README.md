@@ -39,7 +39,7 @@ FontMerger/
 ├── format/                  # static extraction, CFF↔glyf, CID, axis union, transform, subset, webfont
 ├── tables/                  # per-table merge registry + GSUB/GPOS/GDEF merge
 ├── tests/                   # 16-matrix generator + unit tests
-└── build/                   # PyInstaller packaging (bundles FontTools + AFDKO)
+└── build/                   # PyInstaller packaging + source-only release zip (make_release_zip.py)
 ```
 
 ## Features

@@ -9,23 +9,23 @@ All notable changes to **font-matrix-merger** are documented in this file.
 
 ## [Unreleased]
 
-<!--
 ### English
+
 #### Added
--
+- `build/make_release_zip.py` — reproducible **source-only** release packaging: it collects the tracked `*.py` files plus `README.md`, `README.zh-CN.md`, `LICENSE` and `CHANGELOG.md` into `dist/font-matrix-merger-v<version>.zip` (version read from `__init__.py`; zip timestamps pinned to the `HEAD` commit time so rebuilds are byte-identical; font binaries rejected defensively).
+
 #### Changed
--
-#### Fixed
--
+- Source-only release archives now include `CHANGELOG.md`.
 
 ### 简体中文
+
 #### 新增
--
+- `build/make_release_zip.py` —— 可复现的**仅源码**发布打包：把已跟踪的 `*.py` 与 `README.md`、`README.zh-CN.md`、`LICENSE`、`CHANGELOG.md` 收进 `dist/font-matrix-merger-v<版本>.zip`（版本号取自 `__init__.py`；zip 内时间戳固定为 `HEAD` 提交时间，重复打包字节一致；并防御性拒绝字体二进制）。
+
 #### 变更
--
-#### 修复
--
--->
+- 仅源码发布包开始包含 `CHANGELOG.md`。
+
+<!-- 新条目请按上方双语结构追加 / append new entries in the same bilingual structure -->
 
 ## [0.1.1] — 2026-09-12
 

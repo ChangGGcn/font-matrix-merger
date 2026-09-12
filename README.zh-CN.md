@@ -39,7 +39,7 @@ FontMerger/
 ├── format/                  # 静态提取、CFF↔glyf、CID、Axis 并集、变换、子集、webfont
 ├── tables/                  # 逐表合并注册表 + GSUB/GPOS/GDEF 合并
 ├── tests/                   # 16 矩阵生成器 + 单元测试
-└── build/                   # PyInstaller 打包（捆绑 FontTools + AFDKO）
+└── build/                   # PyInstaller 打包 + 仅源码发布包（make_release_zip.py）
 ```
 
 ## 功能介绍
