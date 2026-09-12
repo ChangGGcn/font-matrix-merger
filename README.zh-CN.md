@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)]()
 [![FontTools](https://img.shields.io/badge/fontTools-%E2%89%A54.49-important.svg)]()
-[![Version](https://img.shields.io/badge/version-0.1.0--alpha1-orange.svg)]()
+[![Version](https://img.shields.io/badge/version-0.1.1-blue.svg)]()
 
 [English](README.md) | **简体中文**
 
