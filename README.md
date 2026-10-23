@@ -14,7 +14,6 @@
 The library is built on top of [**FontTools**](https://github.com/fonttools/fonttools) (MIT) — used for all glyph/table-level manipulation, CFF/CFF2 conversion, varLib instancing and subsetting — and follows the conventions of [**AFDKO**](https://github.com/adobe-type-tools/afdko) (Adobe Font Development Kit for OpenType, Apache-2.0), which is bundled in the project's PyInstaller build pipeline and referenced for its CID-keyed UFO / CIDMap remapping approach.
 
 Release history (bilingual English / 简体中文): **[CHANGELOG.md](CHANGELOG.md)**.
-Engineering docs (Chinese): **[docs/](docs/)** — architecture, development conventions, handover notes and the multi-agent collaboration guide.
 
 Key highlights:
 
@@ -36,7 +35,6 @@ FontMerger/
 ├── FontMerging.py           # Interactive CLI entry point
 ├── __init__.py              # Public API exports
 ├── CHANGELOG.md             # Release history (bilingual EN / 简体中文)
-├── docs/                    # Engineering docs (architecture / conventions / handover / agents)
 ├── core/                    # 16-way dispatch, TTX glyph injection, conflict & naming
 ├── format/                  # static extraction, CFF↔glyf, CID, axis union, transform, subset, webfont
 ├── tables/                  # per-table merge registry + GSUB/GPOS/GDEF merge
@@ -77,7 +75,7 @@ Main and base fonts are each classified as `static/variable × OTF/TTF` — 16 s
 | **Variable OTF main** | Asks whether to export variable or static: ① Static → interpolate a font at the main’s axis values, then handle as static; ② Variable → drop base glyphs conflicting with main, merge main glyphs into the variable OTF’s default master, insert main’s OpenType features into each master | Same as left (static path) | *Master handling*: drop base glyphs conflicting in each master; merge base masters into main — same axis values → add glyphs/features to the main master, different axis values → create a new master. *Axis handling*: axis min/max = union; base-only axes are added (missing masters filled with default values) | Asks the user whether to export TTF or OTF; then same as “Variable OTF main × Variable OTF base” |
 | **Variable TTF main** | Asks whether to export variable or static (same as “Variable OTF main”; on the variable path main glyphs are converted to quadratic first) | Same as left (static path) | Asks TTF or OTF; then same as “Variable OTF main × Variable OTF base” | Same as “Variable OTF main × Variable OTF base” |
 
-> **Note on the export-format questions**: the TTF/OTF question is still asked and memorized across levels, but the current implementation derives the output outline format from the **main font** (base outlines are converted to it). Only the *variable vs static* question changes the code path — tracked as technical debt in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §10.4.
+> **Note on the export-format questions**: the TTF/OTF question is still asked and memorized across levels, but the current implementation derives the output outline format from the **main font** (base outlines are converted to it). Only the *variable vs static* question changes the code path (recorded as technical debt in the project's engineering notes).
 
 ### General rules (all combinations)
 

@@ -15,8 +15,8 @@ env/
 htmlcov/
 
 # === PyInstaller build outputs ===
-# 注意：build/build_exe.py 和 build/merge_fonts.spec 是源码，需要提交；
-# 这里只忽略 PyInstaller 生成的输出子目录（如 build/merge_fonts/）
+# 注意：build/build_exe.py 和 build/font_merger.spec 是源码，需要提交；
+# 这里只忽略 PyInstaller 生成的输出子目录（build/build/ 与 build/dist/）
 build/*/
 *.manifest
 *.toc
@@ -49,6 +49,11 @@ matrix_out/
 
 # 本地字体路径配置（含商业授权字体文件名，不入库）
 tests/local_fonts.py
+
+# === 工程文档：本地私有，不入库、不进发布包 ===
+# docs/ 与仓库根 AGENTS.md 供本地开发与多 Agent 协作使用
+/docs/
+/AGENTS.md
 
 # === 编辑器 / 操作系统 ===
 .idea/

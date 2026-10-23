@@ -13,10 +13,11 @@ All notable changes to **font-matrix-merger** are documented in this file.
 
 #### Added
 - `build/make_release_zip.py` — reproducible **source-only** release packaging: it collects the tracked `*.py` files plus `README.md`, `README.zh-CN.md`, `LICENSE` and `CHANGELOG.md` into `dist/font-matrix-merger-v<version>.zip` (version read from `__init__.py`; zip timestamps pinned to the `HEAD` commit time so rebuilds are byte-identical; font binaries rejected defensively).
-- Engineering documentation under `docs/`: `ARCHITECTURE.md` (layering and known exceptions, merge pipeline, OT/variable-font invariants, module map, composition subsystem, extension points and debt), `CONVENTIONS.md` (language/document style, layering, code style, font-data rules, testing, Git, review checklist, change tiers), `HANDOVER.md` (environment and test fonts, running the suites, release process, timeline, known gaps, debugging playbook) and `AGENTS.md` (roles, shared task board, write scopes, verification gates, reporting contract, red lines). `docs/README.md` indexes them; a repository-root `AGENTS.md` is the entry point for automated agents.
 
 #### Changed
 - Source-only release archives now include `CHANGELOG.md`.
+- Build pipeline: `build/build_exe.py` and the PyInstaller spec were rewritten to target the in-repo entry `FontMerging.py` (the spec is now `build/font_merger.spec`), dropping the old external `../merge_fonts.py` and the afdko collection; the script gained `--check / --install / --clean` and writes to `build/dist/` + `build/build/` (both gitignored).
+- Engineering docs (`docs/` and the root `AGENTS.md`) are kept **local-only**: they are listed in `.gitignore` and excluded from release archives.
 - The READMEs no longer name any specific typeface (CLI sample paths and the `merge_subsets` output name are neutral placeholders), and test comments/docstrings no longer hard-code licensed font paths: every licensed font is resolved through the non-committed `tests/local_fonts.py` (the `vf_ttf_cjk` role was added to the template). Code comments now use placeholder names in examples as well.
 
 #### Fixed
@@ -27,10 +28,11 @@ All notable changes to **font-matrix-merger** are documented in this file.
 
 #### 新增
 - `build/make_release_zip.py` —— 可复现的**仅源码**发布打包：把已跟踪的 `*.py` 与 `README.md`、`README.zh-CN.md`、`LICENSE`、`CHANGELOG.md` 收进 `dist/font-matrix-merger-v<版本>.zip`（版本号取自 `__init__.py`；zip 内时间戳固定为 `HEAD` 提交时间，重复打包字节一致；并防御性拒绝字体二进制）。
-- `docs/` 工程文档：`ARCHITECTURE.md`（分层与已知例外、合并主流程、OT/可变字体不变量、模块地图、合成子系统、扩展点与架构债）、`CONVENTIONS.md`（语言/文档风格、分层、代码风格、字体数据铁律、测试、Git、评审清单、变更分级）、`HANDOVER.md`（环境与测试字体、跑测试、发布流程、时间线、已知缺口、调试口诀）、`AGENTS.md`（角色、共享任务板、写作用域、验证门、汇报契约、红线）；`docs/README.md` 为索引，仓库根 `AGENTS.md` 作为自动化 Agent 入口。
 
 #### 变更
 - 仅源码发布包开始包含 `CHANGELOG.md`。
+- 构建管线：重写 `build/build_exe.py` 与 PyInstaller spec，指向仓库内入口 `FontMerging.py`（spec 更名为 `build/font_merger.spec`），去掉旧的仓库外 `../merge_fonts.py` 与 afdko 收集；脚本新增 `--check / --install / --clean`，产物输出到 `build/dist/` 与 `build/build/`（均已 gitignore）。
+- 工程文档（`docs/` 与根 `AGENTS.md`）改为**仅本地**：加入 `.gitignore`，不随仓库/发布包分发。
 - 两个 README 不再出现任何具体字体名（CLI 样例路径与 `merge_subsets` 输出名改为中性占位）；测试注释/docstring 不再硬编码授权字体路径——所有授权字体统一经不入库的 `tests/local_fonts.py` 解析（模板新增 `vf_ttf_cjk` 角色）；代码注释中的示例名也改为占位符。
 
 #### 修复

@@ -14,7 +14,6 @@
 本库构建于 [**FontTools**](https://github.com/fonttools/fonttools)（MIT 协议）之上——负责全部字形/表级操作、CFF/CFF2 转换、varLib 实例化与子集化；并遵循 [**AFDKO**](https://github.com/adobe-type-tools/afdko)（Adobe Font Development Kit for OpenType，Apache-2.0）的规范——AFDKO 被打包进本项目的 PyInstaller 构建管线，其 CIDKeyed UFO / CIDMap 重映射思路是 CID 合并实现的重要参考。
 
 发布历史（中英双语）：**[CHANGELOG.md](CHANGELOG.md)**。
-工程文档（中文）：**[docs/](docs/)** —— 工程架构、开发规范、交接文档与多 Agent 协作指南。
 
 核心亮点：
 
@@ -36,7 +35,6 @@ FontMerger/
 ├── FontMerging.py           # 交互式 CLI 主入口
 ├── __init__.py              # 公共 API 导出
 ├── CHANGELOG.md             # 发布历史（中英双语）
-├── docs/                    # 工程文档（架构 / 规范 / 交接 / 多 Agent 协作）
 ├── core/                    # 16 路分派、TTX 字形注入、冲突检测、命名
 ├── format/                  # 静态提取、CFF↔glyf、CID、Axis 并集、变换、子集、webfont
 ├── tables/                  # 逐表合并注册表 + GSUB/GPOS/GDEF 合并
@@ -77,7 +75,7 @@ FontMerger/
 | **可变OTF为主** | 询问导出为可变还是静态：① 静态 → 插值得到与主字体轴值相同的静态字体，按静态处理；② 可变 → 删打底冲突字形，主字形加入可变OTF默认 Master，主字体 OpenType 特性插入各 Master | 同左（静态路径） | *Master 处理*：删打底各 Master 中冲突字形；打底各 Master 并入主——轴值相同则在主 Master 中增添字形与特性，轴值不同则新建 Master；*Axis 处理*：Axis 上下限取并集，打底独有 Axis 加入（缺失 Master 补默认值） | 询问导出为 TTF 还是 OTF；随后同“可变OTF为主，可变OTF打底” |
 | **可变TTF为主** | 询问导出为可变还是静态（同“可变OTF为主”；可变路径主字形转二次曲线后同左） | 同左（静态路径） | 询问导出为 TTF 还是 OTF；随后同“可变OTF为主，可变OTF打底” | 同“可变OTF为主，可变OTF打底” |
 
-> **关于“导出格式”询问**：TTF/OTF 问题仍会询问并在多级间记忆，但当前实现的输出轮廓格式由**主字体**决定（打底轮廓会转换为主字体的格式）；真正改变代码路径的只有“可变/静态”这一问。该差异记录在 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §10.4 的技术债清单里。
+> **关于“导出格式”询问**：TTF/OTF 问题仍会询问并在多级间记忆，但当前实现的输出轮廓格式由**主字体**决定（打底轮廓会转换为主字体的格式）；真正改变代码路径的只有“可变/静态”这一问。该差异已记为技术债（见工程笔记）。
 
 ### 通用规则（所有组合）
 
