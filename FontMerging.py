@@ -2,8 +2,9 @@
 """FontMerger — 字体合并工具主入口
 
 用法:
-    python FontMerging.py                     # 交互模式
-    python FontMerging.py main.otf base.otf   # 命令行模式
+    python FontMerging.py     # 交互模式 (逐级询问主字体/打底字体; 当前唯一入口)
+
+非交互调用请用库 API (merge_fonts / FontMerger)。
 """
 
 import os, sys

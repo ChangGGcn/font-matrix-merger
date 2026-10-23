@@ -13,6 +13,7 @@ All notable changes to **font-matrix-merger** are documented in this file.
 
 #### Added
 - `build/make_release_zip.py` — reproducible **source-only** release packaging: it collects the tracked `*.py` files plus `README.md`, `README.zh-CN.md`, `LICENSE` and `CHANGELOG.md` into `dist/font-matrix-merger-v<version>.zip` (version read from `__init__.py`; zip timestamps pinned to the `HEAD` commit time so rebuilds are byte-identical; font binaries rejected defensively).
+- Engineering documentation under `docs/`: `ARCHITECTURE.md` (layering and known exceptions, merge pipeline, OT/variable-font invariants, module map, composition subsystem, extension points and debt), `CONVENTIONS.md` (language/document style, layering, code style, font-data rules, testing, Git, review checklist, change tiers), `HANDOVER.md` (environment and test fonts, running the suites, release process, timeline, known gaps, debugging playbook) and `AGENTS.md` (roles, shared task board, write scopes, verification gates, reporting contract, red lines). `docs/README.md` indexes them; a repository-root `AGENTS.md` is the entry point for automated agents.
 
 #### Changed
 - Source-only release archives now include `CHANGELOG.md`.
@@ -20,11 +21,13 @@ All notable changes to **font-matrix-merger** are documented in this file.
 
 #### Fixed
 - Documentation and test comments no longer mislabel a commercially licensed third-party test font as an OFL Google Font, and the composition example uses neutral placeholder file names instead of naming licensed fonts.
+- Documentation accuracy pass: the pipeline bullet now says CFF/CFF2/CID injection uses the TTX roundtrip while `glyf` merges take the object-level fast path; the stale "master-level composition not implemented" note is replaced by the v0.1.1 behaviour; the merge matrix now explains that the TTF/OTF question is recorded but the output format follows the main font; `tables/varstore.py`'s docstring now states that a `VariationIndex` inner index is a **row** (not a region). Also removed the last PEP 701 f-string (Python 3.8 compatibility) and corrected `FontMerging.py`'s usage text (there is no command-line mode).
 
 ### 简体中文
 
 #### 新增
 - `build/make_release_zip.py` —— 可复现的**仅源码**发布打包：把已跟踪的 `*.py` 与 `README.md`、`README.zh-CN.md`、`LICENSE`、`CHANGELOG.md` 收进 `dist/font-matrix-merger-v<版本>.zip`（版本号取自 `__init__.py`；zip 内时间戳固定为 `HEAD` 提交时间，重复打包字节一致；并防御性拒绝字体二进制）。
+- `docs/` 工程文档：`ARCHITECTURE.md`（分层与已知例外、合并主流程、OT/可变字体不变量、模块地图、合成子系统、扩展点与架构债）、`CONVENTIONS.md`（语言/文档风格、分层、代码风格、字体数据铁律、测试、Git、评审清单、变更分级）、`HANDOVER.md`（环境与测试字体、跑测试、发布流程、时间线、已知缺口、调试口诀）、`AGENTS.md`（角色、共享任务板、写作用域、验证门、汇报契约、红线）；`docs/README.md` 为索引，仓库根 `AGENTS.md` 作为自动化 Agent 入口。
 
 #### 变更
 - 仅源码发布包开始包含 `CHANGELOG.md`。
@@ -32,6 +35,7 @@ All notable changes to **font-matrix-merger** are documented in this file.
 
 #### 修复
 - 文档与测试注释不再把某个商业授权的第三方测试字体误标为 OFL / Google Fonts；合成示例改用中性占位文件名，不再点名授权字体。
+- 文档准确性修正：管线条目改为“CFF/CFF2/CID 走 TTX 往返、`glyf` 合并走对象级快路径”；删掉过时的“master-level composition 未实现”表述（v0.1.1 已实现）；合并矩阵下方补充说明“TTF/OTF 询问仅记录，输出格式由主字体决定”；`tables/varstore.py` docstring 更正为 `VariationIndex` 的 inner 是**行号**（不是 region）。同时移除最后一处 PEP 701 f-string（恢复 Python 3.8 兼容），并修正 `FontMerging.py` 的用法说明（不存在命令行模式）。
 
 <!-- 新条目请按上方双语结构追加 / append new entries in the same bilingual structure -->
 

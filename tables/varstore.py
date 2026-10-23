@@ -3,7 +3,8 @@
 
 GPOS 的 Device(DeltaFormat=0x8000) 即 VariationIndex, 用 (outer, inner) 两级
 索引引用 GDEF 的 ItemVariationStore: outer = VarData 序号, inner = 该 VarData
-内的 region 序号。合并多个字体时必须:
+内的**行号 (Item 序号)** —— 不是 region 序号 (引擎取这一行的增量向量与各列
+region 的标量做点积)。合并多个字体时必须:
 
   1. region 按 (StartCoord, PeakCoord, EndCoord) 去重取并集;
   2. 各字体的 VarData 依次拼接, 其 VarRegionIndex 重映射到并集 region 表;

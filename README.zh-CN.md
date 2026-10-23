@@ -14,6 +14,7 @@
 本库构建于 [**FontTools**](https://github.com/fonttools/fonttools)（MIT 协议）之上——负责全部字形/表级操作、CFF/CFF2 转换、varLib 实例化与子集化；并遵循 [**AFDKO**](https://github.com/adobe-type-tools/afdko)（Adobe Font Development Kit for OpenType，Apache-2.0）的规范——AFDKO 被打包进本项目的 PyInstaller 构建管线，其 CIDKeyed UFO / CIDMap 重映射思路是 CID 合并实现的重要参考。
 
 发布历史（中英双语）：**[CHANGELOG.md](CHANGELOG.md)**。
+工程文档（中文）：**[docs/](docs/)** —— 工程架构、开发规范、交接文档与多 Agent 协作指南。
 
 核心亮点：
 
@@ -23,7 +24,7 @@
 - **可变字体**：可变主字体输出仍保持可变，主/打底 Axis 取**并集**（fvar/avar/STAT 同步，varStore Region 扩展）。
 - **跨设计空间合成**：打底可变时，其逐字形增量会被**重参数化到合并后的归一化空间**（`format/axis_mapping.py`），使合并字形在任意位置都与打底在该位置的实例逐点一致——支持打底独有轴、不同轴范围与不同 `avar`。打底默认点与合并默认点不重合时，缺的 master 由幽灵点插值补出并重定基；网格自检（`verify_composition`）不通过则回退到旧的"按打底默认实例化"行为。同一套数学还覆盖 **CFF2 打底**（`format/cff2_compose.py`：逐条重写 `blend`/`vsindex`，并集 `VarStore`，按字形名重接打底 `HVAR`）与打底的**布局变化数据**（`GDEF` `ItemVariationStore` + `GPOS` `VariationIndex` 设备）。
 - **OpenType 合并**：打底 GSUB/GPOS/GDEF 通过 `fontTools.subset` 闭包修剪到存活字形后追加，带 lookup 索引重映射与字形名深度重映射；冲突以主为准。
-- **纯 FontTools 管线**：字形注入走官方 TTX XML 往返（`saveXML` → 注入 → `ttx` 编译），绕开 `fontTools.merge` 对 CID-keyed CFF 抛出的 `NotImplementedError`。
+- **纯 FontTools 管线**：CFF/CFF2/CID 字形注入走官方 TTX XML 往返（`saveXML` → 注入 → `ttx` 编译），绕开 `fontTools.merge` 对 CID-keyed CFF 抛出的 `NotImplementedError`；`glyf`+`glyf` 合并走对象级快路径（见 **glyf 快速注入**）。
 - **同源分片并集**：`merge_subsets()` 把同一可变字体按 `unicode-range` 切出的 webfont 分片**保特性**并回一个可变字体——**glyf 与 CFF2** 轮廓、`gvar`/CFF2 blend（`vsindex` + FDSelect/FDArray）、`hmtx`/`vmtx`、`cmap`、GSUB/GPOS lookup（同 tag **并集**）、GDEF `ItemVariationStore`/`MarkGlyphSetsDef`、`HVAR`/`VVAR` 全部保留，字重插值与 `vert`/`vrt2`/`kern`/`mark` 不丢。
 - **合并自检**：`verify_merge()` 在多个轴位置实例化源分片与合并结果，逐字形比对轮廓/度量，并断言码位、特性、布局完整性与容器元数据。
 - **产物保存防护**：所有保存点走 `save_font()`——清 `flavor` + 校验 sfnt 魔数；woff2 载入的字体不会再被写成"名为 .ttf、实为 `wOF2`"的文件。
@@ -35,6 +36,7 @@ FontMerger/
 ├── FontMerging.py           # 交互式 CLI 主入口
 ├── __init__.py              # 公共 API 导出
 ├── CHANGELOG.md             # 发布历史（中英双语）
+├── docs/                    # 工程文档（架构 / 规范 / 交接 / 多 Agent 协作）
 ├── core/                    # 16 路分派、TTX 字形注入、冲突检测、命名
 ├── format/                  # 静态提取、CFF↔glyf、CID、Axis 并集、变换、子集、webfont
 ├── tables/                  # 逐表合并注册表 + GSUB/GPOS/GDEF 合并
@@ -75,6 +77,8 @@ FontMerger/
 | **可变OTF为主** | 询问导出为可变还是静态：① 静态 → 插值得到与主字体轴值相同的静态字体，按静态处理；② 可变 → 删打底冲突字形，主字形加入可变OTF默认 Master，主字体 OpenType 特性插入各 Master | 同左（静态路径） | *Master 处理*：删打底各 Master 中冲突字形；打底各 Master 并入主——轴值相同则在主 Master 中增添字形与特性，轴值不同则新建 Master；*Axis 处理*：Axis 上下限取并集，打底独有 Axis 加入（缺失 Master 补默认值） | 询问导出为 TTF 还是 OTF；随后同“可变OTF为主，可变OTF打底” |
 | **可变TTF为主** | 询问导出为可变还是静态（同“可变OTF为主”；可变路径主字形转二次曲线后同左） | 同左（静态路径） | 询问导出为 TTF 还是 OTF；随后同“可变OTF为主，可变OTF打底” | 同“可变OTF为主，可变OTF打底” |
 
+> **关于“导出格式”询问**：TTF/OTF 问题仍会询问并在多级间记忆，但当前实现的输出轮廓格式由**主字体**决定（打底轮廓会转换为主字体的格式）；真正改变代码路径的只有“可变/静态”这一问。该差异记录在 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §10.4 的技术债清单里。
+
 ### 通用规则（所有组合）
 
 1. **多级打底**：主字体与前 (n−1) 级打底字体的结果作为第 n 级的“主字体”；已询问过的复杂情况不再询问（记忆）
@@ -83,7 +87,7 @@ FontMerger/
 4. **字形保留**：主字体所有字形保留；打底仅“码位与名称均不与主字体冲突”的字形并入
 5. **输入格式**：WOFF/WOFF2 自动解包；TTC/OTC 需先解包；其他格式拒绝
 
-> **当前实现状态**：可变主字体的“② 可变路径”已支持（主 VF 保留输出 + Axis 并集 + 打底字形按默认实例并入）；“Master 处理”的逐轴插值合成（打底字形随打底轴变动）尚未实现。
+> **当前实现状态**：可变主字体的“② 可变路径”已支持（主 VF 保留输出 + Axis 并集 + 打底字形并入）。自 **v0.1.1** 起打底的可变数据也会被**合成**：逐字形 `gvar` 增量、CFF2 `blend`/`vsindex` 数据与打底布局变化数据都会重参数化到合并归一化空间（见 Features 与已知限制 #2），并带网格自检与自动回退（不通过则回退到“按打底默认实例化”的旧行为）。
 
 ## 快速开始
 
@@ -98,7 +102,7 @@ pip install "fonttools>=4.49"
 python FontMerging.py
 ```
 
-CLI 为交互式：依次输入主字体（缩放% + 基线偏移）、任意级打底字体（`Y` 结束），兼容性警告按 `y` 确认继续，最终输出 `<主字体>_mod.{otf|ttf}`。
+CLI 为交互式：依次输入主字体（缩放% + 基线偏移）、任意级打底字体（`Y` 结束），兼容性警告仅提示、不兼容时询问 `y`/`N`，最终输出 `<主字体>_mod.{otf|ttf}`。
 
 ### 三字体输入输出样例（主 + 两级打底）
 
@@ -175,7 +179,7 @@ CLI 为交互式：依次输入主字体（缩放% + 基线偏移）、任意级
 
 - 导出格式类询问只问一次，后续级自动复用答案（记忆机制）
 - 每级打底可独立指定缩放倍率与基线偏移
-- 兼容性警告仅提示，`y` 可确认继续
+- 兼容性警告仅提示；不兼容时询问 `y`/`N`
 
 ### 编程接口
 

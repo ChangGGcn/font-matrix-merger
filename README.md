@@ -14,6 +14,7 @@
 The library is built on top of [**FontTools**](https://github.com/fonttools/fonttools) (MIT) — used for all glyph/table-level manipulation, CFF/CFF2 conversion, varLib instancing and subsetting — and follows the conventions of [**AFDKO**](https://github.com/adobe-type-tools/afdko) (Adobe Font Development Kit for OpenType, Apache-2.0), which is bundled in the project's PyInstaller build pipeline and referenced for its CID-keyed UFO / CIDMap remapping approach.
 
 Release history (bilingual English / 简体中文): **[CHANGELOG.md](CHANGELOG.md)**.
+Engineering docs (Chinese): **[docs/](docs/)** — architecture, development conventions, handover notes and the multi-agent collaboration guide.
 
 Key highlights:
 
@@ -26,7 +27,7 @@ Key highlights:
 - **Variable fonts**: a variable main font stays variable in the output, with axis **union** across main and base fonts (fvar/avar/STAT synchronized, varStore regions extended).
 - **Cross-design-space composition**: when the base font is variable, its per-glyph deltas are **re-parameterized into the merged normalized space** (`format/axis_mapping.py`), so the merged glyphs stay pointwise equal to the base instance at every location — including base-only axes, different axis ranges and different `avar` maps. When the base's default differs from the merged default the missing master is interpolated (phantom points included) and the tuples are re-based; a grid self-check (`verify_composition`) must pass or the merge falls back to the legacy "instance the base at its default" behaviour. The same machinery covers **CFF2 bases** (`format/cff2_compose.py`: every `blend`/`vsindex` is rewritten, the `VarStore` is unioned and the base's `HVAR` is re-attached by glyph name) and the **layout variation** of the base (`GDEF` `ItemVariationStore` + `GPOS` `VariationIndex` devices).
 - **OpenType merging**: base GSUB/GPOS/GDEF tables are pruned with `fontTools.subset` closure to the surviving glyphs, then appended with lookup-index remapping and deep glyph-name remapping; conflicts resolve in favor of the main font.
-- **Pure FontTools pipeline**: glyph injection goes through the official TTX XML roundtrip (`saveXML` → inject → `ttx` compile) instead of `fontTools.merge`, which raises `NotImplementedError` on CID-keyed CFF.
+- **Pure FontTools pipeline**: CFF/CFF2/CID glyph injection goes through the official TTX XML roundtrip (`saveXML` → inject → `ttx` compile) instead of `fontTools.merge`, which raises `NotImplementedError` on CID-keyed CFF; `glyf`+`glyf` merges take the object-level fast path instead (see **Fast glyf injection**).
 
 ### Project layout
 
@@ -35,6 +36,7 @@ FontMerger/
 ├── FontMerging.py           # Interactive CLI entry point
 ├── __init__.py              # Public API exports
 ├── CHANGELOG.md             # Release history (bilingual EN / 简体中文)
+├── docs/                    # Engineering docs (architecture / conventions / handover / agents)
 ├── core/                    # 16-way dispatch, TTX glyph injection, conflict & naming
 ├── format/                  # static extraction, CFF↔glyf, CID, axis union, transform, subset, webfont
 ├── tables/                  # per-table merge registry + GSUB/GPOS/GDEF merge
@@ -75,6 +77,8 @@ Main and base fonts are each classified as `static/variable × OTF/TTF` — 16 s
 | **Variable OTF main** | Asks whether to export variable or static: ① Static → interpolate a font at the main’s axis values, then handle as static; ② Variable → drop base glyphs conflicting with main, merge main glyphs into the variable OTF’s default master, insert main’s OpenType features into each master | Same as left (static path) | *Master handling*: drop base glyphs conflicting in each master; merge base masters into main — same axis values → add glyphs/features to the main master, different axis values → create a new master. *Axis handling*: axis min/max = union; base-only axes are added (missing masters filled with default values) | Asks the user whether to export TTF or OTF; then same as “Variable OTF main × Variable OTF base” |
 | **Variable TTF main** | Asks whether to export variable or static (same as “Variable OTF main”; on the variable path main glyphs are converted to quadratic first) | Same as left (static path) | Asks TTF or OTF; then same as “Variable OTF main × Variable OTF base” | Same as “Variable OTF main × Variable OTF base” |
 
+> **Note on the export-format questions**: the TTF/OTF question is still asked and memorized across levels, but the current implementation derives the output outline format from the **main font** (base outlines are converted to it). Only the *variable vs static* question changes the code path — tracked as technical debt in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §10.4.
+
 ### General rules (all combinations)
 
 1. **Multi-level chaining**: the result of main + first (n−1) base levels becomes the “main” of level n; already-asked questions are not asked again (memorized).
@@ -83,7 +87,7 @@ Main and base fonts are each classified as `static/variable × OTF/TTF` — 16 s
 4. **Glyph retention**: all main-font glyphs are kept; base glyphs are merged only when **both codepoint and name** do not conflict with the main font.
 5. **Input formats**: WOFF/WOFF2 are unwrapped automatically; TTC/OTC must be unpacked first; other formats are rejected.
 
-> **Implementation status**: the “② Variable path” of a variable main font is supported (main VF preserved + axis union + base glyphs merged at the default instance). Per-axis *master-level interpolation composition* (base glyphs varying with the base’s axes) is **not yet implemented**.
+> **Implementation status**: the “② Variable path” of a variable main font is supported (main VF preserved + axis union + base glyphs merged). Since **v0.1.1** the base’s variable data is **composed** as well: per-glyph `gvar` deltas, CFF2 `blend`/`vsindex` data and the base’s layout variation are re-parameterized into the merged normalized space (see Features and Known Limitations #2), guarded by a grid self-check with automatic fallback to the legacy “instance the base at its default” behaviour.
 
 ## Quick Start
 
@@ -98,7 +102,7 @@ pip install "fonttools>=4.49"
 python FontMerging.py
 ```
 
-The CLI is interactive: enter the main font path (plus scale % and baseline offset), then any number of base fonts (press `Y` to finish), and compatibility warnings can be confirmed with `y`. The output is written to `<main font>_mod.{otf|ttf}`.
+The CLI is interactive: enter the main font path (plus scale % and baseline offset), then any number of base fonts (press `Y` to finish), compatibility warnings are printed, and an incompatible pair asks for `y`/`N` confirmation. The output is written to `<main font>_mod.{otf|ttf}`.
 
 ### Three-font input/output example (main + 2 base levels)
 
@@ -175,7 +179,7 @@ Notes:
 
 - Export-format / output questions are asked only **once**; later levels reuse the memorized answer.
 - Each base level can have its own scale % and baseline offset.
-- Compatibility warnings are informational; confirm with `y` to continue.
+- Compatibility warnings are informational; an incompatible pair asks `y`/`N` before continuing.
 
 ### Library API
 

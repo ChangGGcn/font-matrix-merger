@@ -505,7 +505,7 @@ def main():
             print(f"  {test.__name__}: FAILED - {e}")
             import traceback
             traceback.print_exc()
-    print(f"\n{"="*50}")
+    print("\n" + "=" * 50)
     print(f"  Results: {passed}/{len(tests)} passed")
     return passed == len(tests)
 
