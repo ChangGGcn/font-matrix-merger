@@ -14,9 +14,9 @@ Logic.md 第 3 条:
 合并细则:
   * 字形取舍: 打底 lookup 引用的字形必须都在主字体里, 否则整条 lookup 跳过
     (Extension 子表要展开递归, 见 _lookup_glyphs_in_font);
-  * 同 tag feature **做 lookup 并集**并入主记录 (而非整条跳过 ——
-    每个打底字体的 vert/vrt2/kern/mark 只覆盖自己的字形);
-    FeatureParams 不同才另立记录;
+  * 先构建存活 lookup 的完整索引映射并补齐嵌套闭包；失效动作所在规则整条删除;
+  * 同 tag feature 仅在同一 Script/LangSys 内做 lookup 并集，主来源参数优先，
+    不改其它脚本/语言的引用，必需特性与可选特性不混为一谈;
   * 打底的 ScriptList/LangSys 一并并入, 之后 FeatureList 按 tag 排序并
     重写全部 FeatureIndex (否则追加的 feature 不可达);
   * GDEF GlyphClassDef/MarkAttachClassDef 取并集 (主优先), ItemVariationStore
@@ -24,13 +24,17 @@ Logic.md 第 3 条:
   * 追加/改名之后调用 resort_layout() 修复 Coverage 与并行数组的同序不变量。
 """
 import copy
-from fontTools.ttLib import TTFont
+from fontTools.ttLib import TTFont, newTable
+from fontTools.ttLib.tables import otTables as ot
 from fontTools.subset import Subsetter, Options
 
-from .layout_union import (MarkGlyphSetUnion, _freeze, find_or_create_lang,
+from .layout_union import (MarkGlyphSetUnion, find_or_create_lang,
+                           _coalesce_langsys_features, _lookup_records,
+                           _merge_required_feature, _ordered_unique,
+                           _prepare_lookup_graph,
                            lang_systems, lang_systems_with_tag,
                            offset_var_devices, remap_feature_variations,
-                           remap_glyph_names, resort_layout)
+                           resort_layout)
 from .varstore import VarStoreUnion
 
 
@@ -101,10 +105,10 @@ def merge_base_layout(main_font, base_pruned, kept_glyphs):
     """把修剪后的打底布局表合并进主字体。
 
     规则:
-      - 主字体已有 GSUB/GPOS/GDEF: 完全保留, 打底的 feature 若与主
-        feature tag 冲突则跳过 (以主为准); 非冲突 tag/script/lang 追加。
-      - 主字体无对应表: 直接使用打底的修剪结果。
-    冲突检测粒度: feature tag + script tag + lang sys (简化: feature tag)。
+      - 主字体已有 GSUB/GPOS/GDEF: 保留主来源规则，打底按存活 lookup 图
+        追加，只在相同 script/lang 内归并同 tag（主参数优先）。
+      - 主字体无对应表: 仍须校验打底引用并重定位 GDEF 相关索引后采用。
+      - 打底 FV 不与已有主条件跨来源拼接；主无布局表时可完整采用。
 
     Args:
         main_font: 主字体 (就地修改)
@@ -153,11 +157,19 @@ def merge_base_layout(main_font, base_pruned, kept_glyphs):
         if tag not in base_layout:
             continue
         if tag not in main_layout:
-            main_font[tag] = copy.deepcopy(base_layout[tag])
-            n_feat = (sum(len(fr.FeatureRecord)
-                          for fr in base_layout[tag].table.FeatureList.FeatureRecord)
-                      if base_layout[tag].table.FeatureList else 0)
-            print(f"  [OT合并] {tag}: 来自打底 (主无, {n_feat} features)")
+            # 不能直接复制：主无该表时同样可能有失效字形、内部索引和 GDEF 偏移。
+            adopted = newTable(tag)
+            adopted.table = ot.GSUB() if tag == "GSUB" else ot.GPOS()
+            adopted.table.Version = 0x00010000
+            adopted.table.ScriptList = None
+            adopted.table.FeatureList = None
+            adopted.table.LookupList = None
+            adopted.table.FeatureVariations = None
+            _merge_gsub_gpos(main_font, tag, adopted.table,
+                             base_layout[tag].table, var_offset, mark_remap)
+            if adopted.table.FeatureList is not None:
+                main_font[tag] = adopted
+                resort_layout(main_font)
             continue
 
         main_tbl = main_layout[tag].table
@@ -165,6 +177,7 @@ def merge_base_layout(main_font, base_pruned, kept_glyphs):
         _merge_gsub_gpos(main_font, tag, main_tbl, base_tbl, var_offset,
                          mark_remap)
 
+    resort_layout(main_font)
     return main_font
 
 
@@ -260,121 +273,108 @@ def _merge_gdef(font, main_gdef, base_gdef, kept, var_union=None,
 
 def _merge_gsub_gpos(font, tag, main_tbl, base_tbl, var_offset=0,
                      mark_set_remap=()):
-    """GSUB/GPOS 表级合并: 主字体全部保留, 打底 lookup **并集**追加。
-
-    与"同 tag 就整条跳过"的旧逻辑不同: 同一个 tag 的 lookup 做并集,
-    并入主的同一条 FeatureRecord。每个打底字体 (或分片) 的 vert/vrt2/kern/mark
-    只覆盖自己的字形, 跳过等于丢掉后面所有字体的特性; 只有 FeatureParams
-    不同 (ss01/size 等) 才另立一条记录。
-
-    打底的 ScriptList/LangSys 一并并入 (否则追加的 feature 根本不可达),
-    最后 FeatureList 按 tag 排序并重写全部 FeatureIndex。
-    """
-    if main_tbl.LookupList is None:
-        from fontTools.ttLib.tables.otTables import LookupList
-        main_tbl.LookupList = LookupList()
-        main_tbl.LookupList.Lookup = []
-    main_lookups = main_tbl.LookupList.Lookup
+    """按源顺序合并完整 lookup 图，再按 LangSys 合并同 tag（主参数优先）。"""
     base_lookups = base_tbl.LookupList.Lookup if base_tbl.LookupList else []
-    if (not base_lookups or base_tbl.FeatureList is None
-            or not base_tbl.FeatureList.FeatureRecord):
-        print(f"  [OT合并] {tag}: 打底无 feature/lookup, 只保留主")
+    if base_tbl.FeatureList is None:
+        print("  [OT合并] %s: 打底无 feature/lookup，保留主来源" % tag)
         return
-
+    # 先在副本上验证 FV/必需引用，失败时不留下部分追加的布局表。
+    original = main_tbl
+    main_tbl = copy.deepcopy(main_tbl)
+    if main_tbl.LookupList is None:
+        main_tbl.LookupList = ot.LookupList()
+        main_tbl.LookupList.Lookup = []
     if main_tbl.FeatureList is None:
-        from fontTools.ttLib.tables.otTables import FeatureList
-        main_tbl.FeatureList = FeatureList()
+        main_tbl.FeatureList = ot.FeatureList()
         main_tbl.FeatureList.FeatureRecord = []
+    main_lookups = main_tbl.LookupList.Lookup
+    records = list(main_tbl.FeatureList.FeatureRecord)
+    adopt_fv = not main_lookups and not records
+    base_fv = getattr(base_tbl, "FeatureVariations", None)
 
-    # 同 tag (+ 同 FeatureParams) 的主记录: 打底的 lookup 并入其中
-    main_by_key = {}
-    for fr in main_tbl.FeatureList.FeatureRecord:
-        main_by_key.setdefault(_freeze((fr.FeatureTag, _params_key(fr))), fr)
-
-    lookup_cache = {}
-
-    def merged_lookup(li):
-        if li in lookup_cache:
-            return lookup_cache[li]
-        new_lookup = copy.deepcopy(base_lookups[li])
-        # 字形名对齐: uniXXXX → 主字体的等价名 (A, ae 等)
-        _remap_lookup_glyph_names(font, new_lookup)
-        # 校验: lookup 引用的所有字形必须存在于主字体, 否则跳过
-        if not _lookup_glyphs_in_font(font, new_lookup):
-            lookup_cache[li] = None
-            return None
-        # GPOS VariationIndex 重定位到并集 VarStore
-        offset_var_devices(new_lookup, var_offset)
-        # LookupFlag bit4: MarkFilteringSet 是 GDEF MarkGlyphSetsDef 的下标,
-        # 并集后必须重映射 (同 fontTools merge.layout 的 mapMarkFilteringSets)
-        if (mark_set_remap
-                and getattr(new_lookup, "MarkFilteringSet", None) is not None
-                and getattr(new_lookup, "LookupFlag", 0) & 0x0010):
-            idx = new_lookup.MarkFilteringSet
-            new_lookup.MarkFilteringSet = (mark_set_remap[idx]
-                                           if idx < len(mark_set_remap) else 0)
-        main_lookups.append(new_lookup)
-        lookup_cache[li] = len(main_lookups) - 1
-        return lookup_cache[li]
-
-    new_records = []
-    feature_of_base = {}      # 打底 FeatureRecord 下标 → 合并后记录对象
-    unioned = 0
-    for i, fr in enumerate(base_tbl.FeatureList.FeatureRecord):
-        idxs = []
-        for li in fr.Feature.LookupListIndex:
-            if li >= len(base_lookups):
-                continue
-            mi = merged_lookup(li)
-            if mi is not None and mi not in idxs:
-                idxs.append(mi)
-        if not idxs:
+    # kern 及其上下文闭包不能通用地按码位重定向到主来源字形，避免双重定位。
+    kern_lookups = set()
+    pending = [i for fr in base_tbl.FeatureList.FeatureRecord
+               if tag == "GPOS" and fr.FeatureTag == "kern"
+               for i in fr.Feature.LookupListIndex]
+    while pending:
+        i = pending.pop()
+        if i in kern_lookups or not 0 <= i < len(base_lookups):
             continue
-        key = _freeze((fr.FeatureTag, _params_key(fr)))
-        target = main_by_key.get(key)
-        if target is not None:
-            for mi in idxs:
-                if mi not in target.Feature.LookupListIndex:
-                    target.Feature.LookupListIndex.append(mi)
-            unioned += 1
-        else:
-            target = copy.deepcopy(fr)
-            target.Feature.LookupListIndex = list(idxs)
-            main_by_key[key] = target
-            new_records.append(target)
+        kern_lookups.add(i)
+        pending.extend(r.LookupListIndex for r in _lookup_records(base_lookups[i]))
+    candidates = copy.deepcopy(base_lookups)
+    for i, lookup in enumerate(candidates):
+        if i not in kern_lookups:
+            _remap_lookup_glyph_names(font, lookup)
+        if not _lookup_glyphs_in_font(font, lookup):
+            candidates[i] = None
+            continue
+        offset_var_devices(lookup, var_offset)
+        if (mark_set_remap and getattr(lookup, "LookupFlag", 0) & 0x0010):
+            idx = lookup.MarkFilteringSet
+            if not 0 <= idx < len(mark_set_remap):
+                candidates[i] = None
+                continue
+            lookup.MarkFilteringSet = mark_set_remap[idx]
+    roots = [i for fr in base_tbl.FeatureList.FeatureRecord
+             for i in fr.Feature.LookupListIndex]
+    fv_features = set()
+    if adopt_fv and base_fv is not None:
+        for rec in base_fv.FeatureVariationRecord:
+            fts = rec.FeatureTableSubstitution
+            for sub in (fts.SubstitutionRecord if fts else []):
+                fv_features.add(sub.FeatureIndex)
+                roots.extend(sub.Feature.LookupListIndex)
+    added, lookup_map = _prepare_lookup_graph(candidates, len(main_lookups), roots)
+    if adopt_fv and base_fv is not None:
+        for rec in base_fv.FeatureVariationRecord:
+            fts = rec.FeatureTableSubstitution
+            for sub in (fts.SubstitutionRecord if fts else []):
+                if any(i not in lookup_map for i in sub.Feature.LookupListIndex):
+                    raise ValueError("打底 FeatureVariations 引用失效 lookup，保留主布局")
+    main_lookups.extend(added)
+    main_tbl.LookupList.LookupCount = len(main_lookups)
+    feature_of_base = {}
+    feature_map = {}
+    for i, fr in enumerate(base_tbl.FeatureList.FeatureRecord):
+        idxs = _ordered_unique(lookup_map[j] for j in fr.Feature.LookupListIndex
+                               if j in lookup_map)
+        # 空默认特性可能只有参数，或者由 FV 提供替换，均不应静默删除。
+        if (not idxs and fr.Feature.LookupListIndex and i not in fv_features):
+            continue
+        target = copy.deepcopy(fr)
+        target.Feature.LookupListIndex = idxs
+        target.Feature.LookupCount = len(idxs)
         feature_of_base[i] = target
-
+        feature_map[i] = len(records)
+        records.append(target)
     if not feature_of_base:
-        print(f"  [OT合并] {tag}: 打底 feature 无有效 lookup, 只保留主")
+        print("  [OT合并] %s: 打底 feature 无有效 lookup，保留主来源" % tag)
         return
-
-    records = list(main_tbl.FeatureList.FeatureRecord) + new_records
+    main_tbl.FeatureList.FeatureRecord = records
     if base_tbl.ScriptList is not None:
         _merge_script_list(main_tbl, base_tbl.ScriptList, feature_of_base, records)
-    feature_remap = _sort_feature_list(main_tbl, records)
-
-    # FeatureVariations: FeatureList 重排后按同一排列重写 FeatureIndex。
-    # 参考 otTables.FeatureVariations 结构: 替换表的 lookup 索引仍指向主的
-    # 原 lookup (索引 0..n-1 未变), 因此只需重写 feature 索引即可完整保留。
-    fv = getattr(main_tbl, "FeatureVariations", None)
-    if fv is not None:
-        if remap_feature_variations(fv, feature_remap):
-            print(f"  [OT合并] {tag}: 丢弃主的 FeatureVariations "
-                  f"(存在无法映射的 feature 索引)")
-            main_tbl.FeatureVariations = None
-        else:
-            print(f"  [OT合并] {tag}: 保留主的 FeatureVariations (索引已重写)")
-
-    # 追加 + 改名后修复 OpenType 排序不变量 (Coverage 与并行数组必须同序)
+    if adopt_fv and base_fv is not None:
+        fv = copy.deepcopy(base_fv)
+        if remap_feature_variations(fv, feature_map):
+            raise ValueError("打底 FeatureVariations 引用失效 feature，保留主布局")
+        for rec in fv.FeatureVariationRecord:
+            fts = rec.FeatureTableSubstitution
+            for sub in (fts.SubstitutionRecord if fts else []):
+                sub.Feature.LookupListIndex = [lookup_map[i]
+                                                for i in sub.Feature.LookupListIndex]
+                sub.Feature.LookupCount = len(sub.Feature.LookupListIndex)
+        main_tbl.FeatureVariations = fv
+        main_tbl.Version = max(main_tbl.Version, 0x00010001)
+    elif base_fv is not None:
+        print("  [OT合并] 告警: %s 打底 FeatureVariations 不跨来源统一，保留主条件" % tag)
+    _coalesce_langsys_features(main_tbl)
+    original.__dict__.clear()
+    original.__dict__.update(main_tbl.__dict__)
     resort_layout(font)
-    print(f"  [OT合并] {tag}: 并入 {unioned} 条同 tag feature, "
-          f"新增 {len(new_records)} 条, 共 {len(records)} 条")
-
-
-def _params_key(fr):
-    """FeatureParams 的可哈希签名 (无参数为 None)"""
-    params = fr.Feature.FeatureParams
-    return (type(params).__name__, _freeze(params)) if params is not None else None
+    print("  [OT合并] %s: 并入 %d 个 lookup、%d 条来源 feature，按 LangSys 归并"
+          % (tag, len(added), len(feature_of_base)))
 
 
 def _merge_script_list(main_tbl, base_script_list, feature_of_base, records):
@@ -391,9 +391,9 @@ def _merge_script_list(main_tbl, base_script_list, feature_of_base, records):
         if msr is None:
             msr = copy.deepcopy(bsr)
             for lang in lang_systems(msr.Script):
-                lang.FeatureIndex = sorted({pos[id(feature_of_base[i])]
-                                            for i in lang.FeatureIndex
-                                            if i in feature_of_base})
+                lang.FeatureIndex = _ordered_unique(
+                    pos[id(feature_of_base[i])] for i in lang.FeatureIndex
+                    if i in feature_of_base)
                 req = getattr(lang, "ReqFeatureIndex", 0xFFFF)
                 if req not in (0xFFFF, None):
                     lang.ReqFeatureIndex = (pos[id(feature_of_base[req])]
@@ -410,32 +410,10 @@ def _merge_script_list(main_tbl, base_script_list, feature_of_base, records):
                 mi = pos[id(fr)]
                 if mi not in m_lang.FeatureIndex:
                     m_lang.FeatureIndex.append(mi)
-
-
-def _sort_feature_list(main_tbl, records):
-    """FeatureList 按 tag 字母序排序 (规范要求), 重写全部 feature 索引。
-
-    Returns:
-        {旧索引: 新索引} —— 供 FeatureVariations 等外部引用重写
-    """
-    order = sorted(range(len(records)), key=lambda i: (records[i].FeatureTag, i))
-    remap = {old: new for new, old in enumerate(order)}
-    main_tbl.FeatureList.FeatureRecord = [records[i] for i in order]
-    if main_tbl.ScriptList is None:
-        return remap
-    for sr in main_tbl.ScriptList.ScriptRecord:
-        if sr.Script.LangSysRecord:
-            sr.Script.LangSysRecord.sort(key=lambda lr: lr.LangSysTag)
-        else:
-            sr.Script.LangSysRecord = []
-        for lang in lang_systems(sr.Script):
-            lang.FeatureIndex = sorted({remap[i] for i in lang.FeatureIndex
-                                        if i in remap})
-            req = getattr(lang, "ReqFeatureIndex", 0xFFFF)
-            if req not in (0xFFFF, None):
-                lang.ReqFeatureIndex = remap.get(req, 0xFFFF)
-    main_tbl.ScriptList.ScriptRecord.sort(key=lambda sr: sr.ScriptTag)
-    return remap
+            required = feature_of_base.get(
+                getattr(b_lang, "ReqFeatureIndex", 0xFFFF))
+            if required is not None:
+                _merge_required_feature(m_lang, pos[id(required)], records)
 
 
 def _remap_lookup_glyph_names(font, lookup):

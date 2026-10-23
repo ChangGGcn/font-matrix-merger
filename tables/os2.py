@@ -1,68 +1,57 @@
-"""OS/2 表合并"""
+"""OS/2 表合并：设计身份以主字体为准，派生字段按实际数据重算。"""
+import copy
+
 from .base import register
-from ._strategies import first, max_val, min_val, bitwise_or
+from ._strategies import bitwise_or
+from .metadata_recalc import _recalc_os2
 
 
 def _merge_os2_fs_type(values):
-    """最少限制的嵌入权限 (参考 fontTools merge/tables.py)"""
+    """保持既有嵌入权限合并策略，不在元数据修复中改变用户策略。"""
     if not values:
         return 0
     result = bitwise_or(values)
-    # Bit 0: Installable. If set, implies Preview & Print, Editable, ReadOnly
     if result & 0x0001:
-        result |= 0x000C  # 允许预览打印 + 可编辑
-    # Bit 2: No embedding → 清所有嵌入位
+        result |= 0x000C
     if result & 0x0002:
         for bit in range(0, 10):
-            if bit not in (1,):
+            if bit != 1:
                 result &= ~(1 << bit)
     return result
 
 
 @register("OS/2")
 def merge_os2(merged, main, bases, added=None):
-    if "OS/2" not in merged:
+    """就地合并 OS/2；保留主表版本，不凭打底版本制造缺字段。"""
+    if "OS/2" not in merged or "OS/2" not in main:
         return
-
     mo = main["OS/2"]
-    bos = [b["OS/2"] for b in bases if "OS/2" in b]
-
-    o = merged["OS/2"]
-    o.version = max_val([mo.version] + [bo.version for bo in bos])
-
+    alive = set(merged.getGlyphOrder())
+    included = alive if added is None else alive & set(added)
+    bos = [base["OS/2"] for base in bases if "OS/2" in base
+           and included & (set(base.getGlyphOrder()) -
+                           set(main.getGlyphOrder()))]
+    table = merged["OS/2"]
     if bos:
-        o.fsType = _merge_os2_fs_type([mo.fsType] + [bo.fsType for bo in bos])
-        o.ulUnicodeRange1 = bitwise_or([mo.ulUnicodeRange1] +
-                                       [bo.ulUnicodeRange1 for bo in bos])
-        o.ulUnicodeRange2 = bitwise_or([mo.ulUnicodeRange2] +
-                                       [bo.ulUnicodeRange2 for bo in bos])
-        o.ulUnicodeRange3 = bitwise_or([mo.ulUnicodeRange3] +
-                                       [bo.ulUnicodeRange3 for bo in bos])
-        o.ulUnicodeRange4 = bitwise_or([mo.ulUnicodeRange4] +
-                                       [bo.ulUnicodeRange4 for bo in bos])
-        o.ulCodePageRange1 = bitwise_or([mo.ulCodePageRange1] +
-                                        [bo.ulCodePageRange1 for bo in bos])
-        o.ulCodePageRange2 = bitwise_or([mo.ulCodePageRange2] +
-                                        [bo.ulCodePageRange2 for bo in bos])
-        o.sTypoAscender = max_val([mo.sTypoAscender] +
-                                  [bo.sTypoAscender for bo in bos])
-        o.sTypoDescender = min_val([mo.sTypoDescender] +
+        table.fsType = _merge_os2_fs_type([mo.fsType] +
+                                         [bo.fsType for bo in bos])
+        for field in ("sTypoAscender", "sTypoLineGap",
+                      "usWinAscent", "usWinDescent"):
+            setattr(table, field, max([getattr(mo, field)] +
+                                     [getattr(bo, field) for bo in bos]))
+        table.sTypoDescender = min([mo.sTypoDescender] +
                                    [bo.sTypoDescender for bo in bos])
-        o.sTypoLineGap = max_val([mo.sTypoLineGap] +
-                                 [bo.sTypoLineGap for bo in bos])
-        o.usWinAscent = max_val([mo.usWinAscent] +
-                                [bo.usWinAscent for bo in bos])
-        o.usWinDescent = max_val([mo.usWinDescent] +
-                                 [bo.usWinDescent for bo in bos])
-        o.fsFirstCharIndex = min_val([mo.fsFirstCharIndex] +
-                                     [bo.fsFirstCharIndex for bo in bos])
-        o.fsLastCharIndex = max_val([mo.fsLastCharIndex] +
-                                    [bo.fsLastCharIndex for bo in bos])
-        o.sxHeight = max_val([mo.sxHeight] + [bo.sxHeight for bo in bos
-                                              if bo.version >= 2])
-        o.sCapHeight = max_val([mo.sCapHeight] + [bo.sCapHeight for bo in bos
-                                                  if bo.version >= 2])
-
-    o.panose = mo.panose
-    o.fsSelection = mo.fsSelection
-    o.achVendID = mo.achVendID
+        table.usFirstCharIndex = min([mo.usFirstCharIndex] +
+                                     [bo.usFirstCharIndex for bo in bos])
+        table.usLastCharIndex = max([mo.usLastCharIndex] +
+                                    [bo.usLastCharIndex for bo in bos])
+        if table.version >= 2:
+            for field in ("sxHeight", "sCapHeight"):
+                values = [getattr(source, field) for source in [mo] + bos
+                          if hasattr(source, field)]
+                if values:
+                    setattr(table, field, max(values))
+    table.panose = copy.deepcopy(mo.panose)
+    table.fsSelection = mo.fsSelection
+    table.achVendID = mo.achVendID
+    _recalc_os2(merged)

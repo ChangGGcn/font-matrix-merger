@@ -6,7 +6,7 @@ from ..utils.detect import is_cff, is_ttf, is_variable, type_label
 from ..format.converter import convert_font_format
 from ..format.static_extract import variable_to_static
 from ..format.subsetter import create_glyph_subset
-from .conflict import resolve_conflicts, plan_alias
+from .conflict import resolve_conflicts, _plan_merge_aliases
 from .glyph_copy import merge_glyphs_via_ttx
 
 
@@ -524,7 +524,20 @@ def _normalize_upm(main_font, base_font):
     from fontTools.ttLib.scaleUpem import scale_upem
     print(f"  [UPM] 缩放打底字体: {base_upm} → {main_upm}")
     scaled = copy.deepcopy(base_font)
+    # 改 UPM 也改变指令所描述的设计单位；不能成套留下旧 hint 环境。
+    from ..format.transform import _remove_hinting
+    _remove_hinting(scaled)
+    vorg_records = (dict(scaled["VORG"].VOriginRecords)
+                    if "VORG" in scaled else None)
     scale_upem(scaled, main_upm)
+    if vorg_records is not None:
+        # 部分 fontTools 版本只缩默认原点，遗漏逐字形 override。
+        # 始终用缩放前快照赋值，避免未来修正版重复缩放。
+        from fontTools.misc.roundTools import otRound
+        ratio = main_upm / base_upm
+        scaled["VORG"].VOriginRecords = {
+            name: otRound(value * ratio)
+            for name, value in vorg_records.items()}
     return scaled
 
 
@@ -578,6 +591,9 @@ class FontMerger:
                 return a
 
     def merge_two(self, m, b):
+        from .invariants import validate_input_uvs
+        validate_input_uvs(m, "主字体")
+        validate_input_uvs(b, "打底字体")
         ms = not is_variable(m)
         mt = is_ttf(m)
         bs = not is_variable(b)
@@ -668,7 +684,7 @@ class FontMerger:
             for tag in ("GSUB", "GPOS", "GDEF"):
                 if tag not in result and tag in m:
                     result[tag] = copy.deepcopy(m[tag])
-            return result
+            return _finalize_merge(result, m, b)
         elif m_is_cid and not b_is_cid:
             # 主 CID + 打底 name-keyed: 打底转 CID → 走双 CID 路径 (主字体的 CID 结构保留)
             print("  [CID归一] 主字体为 CID: 打底 name→CID, 走双 CID 合并")
@@ -684,7 +700,7 @@ class FontMerger:
             for tag in ("GSUB", "GPOS", "GDEF"):
                 if tag not in result and tag in m:
                     result[tag] = copy.deepcopy(m[tag])
-            return result
+            return _finalize_merge(result, m, b)
         elif not m_is_cid and b_is_cid:
             if "CFF2" in m:
                 # 主 CFF2 (无 ROS, FD 体系保留): 打底 CID CFF 直接转 CFF2, 保留 FDArray
@@ -725,12 +741,19 @@ class FontMerger:
                 b = _base
 
         # ── 冲突检测与合并 ──
-        # 自动命名字形 (post 3.0 的 glyphNNNNN) 跨字体同名但不同源: 改名后加入
-        alias = plan_alias(m, b)
+        # 同名字形不代表同轮廓；保留打底独有码位与组件/布局引用。
+        alias = _plan_merge_aliases(m, b)
         if alias:
             from .glyph_rename import renamed_copy
-            print(f"  [改名] {len(alias)} 个自动命名字形重名, 加别名后加入")
+            print(f"  [改名] {len(alias)} 个打底同名字形，加别名后判定并入")
             b = renamed_copy(b, alias)
+            if variable_source is not None:
+                variable_source = renamed_copy(variable_source, alias)
+            if plan is not None and plan.get("cff2"):
+                hvar_map = plan["cff2"]["hvar_map"]
+                plan["cff2"]["hvar_map"] = {
+                    alias.get(name, name): value
+                    for name, value in hvar_map.items()}
         cf = resolve_conflicts(m, b)
         print(f"  [冲突] {len(cf)} 个字形")
         mn = set(m.getGlyphOrder())
@@ -740,7 +763,11 @@ class FontMerger:
         if not to_add:
             reason = _diagnose_empty_merge(m, b, cf)
             print(f"  [提示] 无新增字形 — {reason}")
-            return copy.deepcopy(m)
+            # 只有默认 UVS 或其它 cmap 信息增加时，也必须执行映射并集。
+            from .glyph_copy import _copy_cmap_mappings
+            result = copy.deepcopy(m)
+            _copy_cmap_mappings(result, b, [])
+            return _finalize_merge(result, m, b)
 
         CHUNK_SIZE = 5000
         if len(to_add) > CHUNK_SIZE:
@@ -750,20 +777,23 @@ class FontMerger:
         try:
             result = merge_glyphs_via_ttx(m, b, to_add)
         except Exception as e:
-            print(f"  [合并失败] {e}")
-            return copy.deepcopy(m)
+            print(f"  [合并失败] {e}；终止本级，不返回缺码位的产物")
+            raise RuntimeError("字形注入失败，合并未完成") from e
         print(f"  合并后字形: {len(result.getGlyphOrder())}")
         # 可变数据收尾: 合成自检失败要向上抛 (由 _do_merge 回退到旧路径),
         # 不能在这里被当成"字形合并失败"吞掉
         added_now = _finish_variable_merge(self, result, m, b, variable_source,
                                            plan)
         # 合并打底 OT 特性 (修剪到仅与保留字形相关, 冲突以主为准)
-        _merge_base_layout_once(result, b, to_add)
-        return result
+        _merge_base_layout_once(result, b, added_now)
+        return _finalize_merge(result, m, b)
 
     def _chunked_merge(self, m, b, to_add, chunk_size, variable_source=None,
                        plan=None):
         """分块合并: 将打底字体按 chunk_size 拆分, 逐块合并到主字体"""
+        collisions = (set(m.getGlyphOrder()) & set(b.getGlyphOrder())) - {".notdef"}
+        if collisions:
+            raise ValueError("分块合并要求先完成打底同名归一")
         chunks = [to_add[i:i+chunk_size] for i in range(0, len(to_add), chunk_size)]
         print(f"  [分块] {len(chunks)} 块, 每块 ≤{chunk_size} 字形")
         current = m
@@ -773,12 +803,13 @@ class FontMerger:
                 current = merge_glyphs_via_ttx(current, b, chunk)
                 print(f"→ {len(current.getGlyphOrder())} 字形")
             except Exception as e:
-                print(f"失败: {e}")
-                return current if len(current.getGlyphOrder()) > len(m.getGlyphOrder()) else copy.deepcopy(m)
-        _finish_variable_merge(self, current, m, b, variable_source, plan)
-        # 分块完成后统一合并打底 OT 特性一次
-        _merge_base_layout_once(current, b, to_add)
-        return current
+                print(f"失败: {e}；终止本级，不返回部分完成的产物")
+                raise RuntimeError("分块字形注入失败，合并未完成") from e
+        added_now = _finish_variable_merge(
+            self, current, m, b, variable_source, plan)
+        # 分块完成后统一合并打底 OT 特性和元数据一次。
+        _merge_base_layout_once(current, b, added_now)
+        return _finalize_merge(current, m, b)
 
     # ---- 静态+静态 ----
     def _sOTF_sOTF(self, m, b): return self._do_merge(m, b)
@@ -841,6 +872,27 @@ class FontMerger:
             from ..format.vf_axes import union_axes
             union_axes(m, b)
         return m
+
+
+def _finalize_merge(result, main, base, check_main=True):
+    """统一普通/空新增/分块/CID 出口，不重放旧表注册表。"""
+    from .hinting_policy import apply_hinting_policy
+    from .table_policy import apply_table_policy
+    from ..tables.metadata_recalc import recalc_after_merge
+    from ..tables.layout_union import resort_layout
+    from .invariants import assert_cmap_union, assert_font_structure
+
+    old_names = set(main.getGlyphOrder())
+    added = [name for name in result.getGlyphOrder() if name not in old_names]
+    apply_hinting_policy(result, main, base, added)
+    apply_table_policy(result, main, [base], added)
+    recalc_after_merge(result)
+    resort_layout(result)
+    assert_cmap_union(
+        result, main, base, check_main=check_main,
+        base_mapping=getattr(result, "_fontmerger_base_renames", None))
+    assert_font_structure(result)
+    return result
 
 
 def _merge_base_layout_once(result, base_font, to_add):

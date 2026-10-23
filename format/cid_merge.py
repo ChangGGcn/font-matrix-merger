@@ -54,6 +54,14 @@ def shift_cid_range(font, offset):
     mapping = {gn: rename(gn) for gn in order}
     new_order = [mapping[gn] for gn in order]
 
+    # 改字形序前展开惰性表；否则同一输入会因访问顺序得到不同 cmap 名字。
+    for tag in ("cmap", "hmtx", "vmtx", "VORG",
+                "GSUB", "GPOS", "GDEF"):
+        if tag in font:
+            table = font[tag]
+            if hasattr(table, "ensureDecompiled"):
+                table.ensureDecompiled()
+
     # CharStrings
     cs = td.CharStrings
     cs.charStrings = {mapping.get(k, k): v for k, v in cs.charStrings.items()}
@@ -71,11 +79,26 @@ def shift_cid_range(font, offset):
         font["vmtx"].metrics = {mapping.get(k, k): v
                                 for k, v in font["vmtx"].metrics.items()}
 
-    # cmap
+    # 普通 cmap 与 format 14 的显式变体都按同一清单改名。
     for table in font["cmap"].tables:
         if hasattr(table, "cmap") and table.cmap:
-            pass  # cmap maps codepoint→name, names already updated
+            table.cmap = {cp: mapping.get(gn, gn)
+                          for cp, gn in table.cmap.items()}
+        if table.format == 14:
+            table.uvsDict = {selector: [
+                (cp, mapping.get(gn, gn) if gn is not None else None)
+                for cp, gn in entries]
+                for selector, entries in table.uvsDict.items()}
+    if "VORG" in font:
+        records = font["VORG"].VOriginRecords
+        font["VORG"].VOriginRecords = {mapping.get(gn, gn): value
+                                       for gn, value in records.items()}
+    from ..tables.layout_union import remap_glyph_names
+    for tag in ("GSUB", "GPOS", "GDEF"):
+        if tag in font:
+            remap_glyph_names(font[tag].table, mapping)
 
+    td.CIDCount = _get_max_cid(font) + 1
     if "maxp" in font:
         font["maxp"].numGlyphs = len(new_order)
 
@@ -127,6 +150,14 @@ def merge_cid_fonts(main_font, base_font, added_glyphs):
 
     适用于双 CID 字体, 打底 CID 已偏移以避免名称冲突。
     """
+    # 修改字形序前展开主表，避免旧 hmtx 按新 maxp 字形数解码。
+    for tag in ("hmtx", "vmtx", "cmap", "VORG",
+                "GSUB", "GPOS", "GDEF"):
+        if tag in main_font:
+            table = main_font[tag]
+            if hasattr(table, "ensureDecompiled"):
+                table.ensureDecompiled()
+
     # Desubroutinize both for safe charstring copying
     main_font["CFF "].cff.desubroutinize()
     base_font["CFF "].cff.desubroutinize()
@@ -140,11 +171,18 @@ def merge_cid_fonts(main_font, base_font, added_glyphs):
     main_td = main_font["CFF "].cff[0]
     base_td = base_font["CFF "].cff[0]
 
-    # 直接复制 CharString 对象 (与 fontTools Merger 相同的方式)
+    # 保留两套 Private，不能把打底 CharString 解释到主 FD 的字宽/hint。
+    fd_offset = len(main_td.FDArray)
+    for fd in base_td.FDArray:
+        main_td.FDArray.append(copy.deepcopy(fd))
     copied = 0
     for gn in added_glyphs:
         if gn in base_cs.charStrings and gn not in main_cs.charStrings:
-            main_cs.charStrings[gn] = base_cs.charStrings[gn]
+            obj = copy.deepcopy(base_cs.charStrings[gn])
+            fd = getattr(obj, "fdSelectIndex", 0) + fd_offset
+            obj.fdSelectIndex = fd
+            obj.private = main_td.FDArray[fd].Private
+            main_cs.charStrings[gn] = obj
             copied += 1
 
     # 更新 charset (合并)
@@ -154,6 +192,10 @@ def merge_cid_fonts(main_font, base_font, added_glyphs):
             main_order.append(gn)
     main_font.setGlyphOrder(main_order)
     main_td.charset = main_order
+    main_td.FDSelect.gidArray = [
+        getattr(main_cs.charStrings[gn], "fdSelectIndex", 0)
+        for gn in main_order]
+    main_td.CIDCount = _get_max_cid(main_font) + 1
     main_font["maxp"].numGlyphs = len(main_order)
 
     # 更新 hmtx
@@ -173,15 +215,9 @@ def merge_cid_fonts(main_font, base_font, added_glyphs):
                         ".notdef", (0, 0)
                     ) if ".notdef" in main_font["vmtx"].metrics else (0, 0)
 
-    # 更新 cmap
-    for table in base_font["cmap"].tables:
-        if hasattr(table, "cmap") and table.cmap:
-            for cp, gn in table.cmap.items():
-                if gn in added_glyphs:
-                    for rt in main_font["cmap"].tables:
-                        if (hasattr(rt, "cmap") and rt.format == table.format
-                                and cp not in rt.cmap):
-                            rt.cmap[cp] = gn
+    # 复用普通路径的同步策略，保留主映射、非 BMP 子表与默认/显式 UVS。
+    from ..core.glyph_copy import _copy_cmap_mappings
+    _copy_cmap_mappings(main_font, base_font, added_glyphs)
 
     print(f"  [CID直接合并] 复制 {copied} 个字形")
     return main_font
@@ -197,6 +233,9 @@ def cid_ufo_style_merge(main_font, base_font):
 
     base_shifted = copy.deepcopy(base_font)
     shift_cid_range(base_shifted, offset)
+    # 仅传递名字映射供上层 UVS 自检规范化，不保留字体强引用或写入表。
+    base_renames = dict(zip(base_font.getGlyphOrder(),
+                            base_shifted.getGlyphOrder()))
 
     # 冲突检测 (使用偏移后的名称)
     from ..core.conflict import resolve_conflicts
@@ -209,14 +248,14 @@ def cid_ufo_style_merge(main_font, base_font):
     print(f"  [CID合并] 冲突: {len(conflicts)}, 新增: {len(to_add)}")
 
     if not to_add:
-        return main_font
+        result = copy.deepcopy(main_font)
+        result._fontmerger_base_renames = base_renames
+        return result
 
     result = copy.deepcopy(main_font)
     result = merge_cid_fonts(result, base_shifted, to_add)
 
-    # 合并后转 name-keyed: 移除 ROS, CID→uniXXXX (避免 CID 编译问题)
-    from .cid_convert import cid_to_name
-    result = cid_to_name(result)
+    # 保留 CID/FDArray：转单 Private 的 name-keyed 会丢失打底 FD 语义。
 
     # save→reload 重建所有表, 消除 deepcopy/物化后的对象状态不一致
     # (hmtx/vmtx 键集与 glyphOrder 必须以编译器视图完全一致)
@@ -228,4 +267,5 @@ def cid_ufo_style_merge(main_font, base_font):
     except Exception as e:
         print(f"  [CID合并] save→reload 失败, 保留内存态: {e}")
 
+    result._fontmerger_base_renames = base_renames
     return result

@@ -29,15 +29,13 @@ def _rename_glyf(font, mapping):
     glyf = font["glyf"]
     # 复合字形惰性持有组件 GID; 重组字形序之前必须先展开, 否则组件会指向错字形
     glyf.ensureDecompiled()
-    for gn, g in list(glyf.glyphs.items()):
-        new = mapping.get(gn)
-        if new is None or new == gn:
-            continue
+    for g in glyf.glyphs.values():
         if g.isComposite():
             for comp in g.components:
                 comp.glyphName = mapping.get(comp.glyphName, comp.glyphName)
-        del glyf.glyphs[gn]
-        glyf.glyphs[new] = g
+    # 统一重建可支持交换名，也不会漏掉自身未改名的复合字形。
+    glyf.glyphs = {mapping.get(gn, gn): g
+                   for gn, g in glyf.glyphs.items()}
 
 
 def _rename_cff(font, mapping):
@@ -72,12 +70,14 @@ def _rename_cmap(font, mapping):
         return
     for st in font["cmap"].tables:
         cm = getattr(st, "cmap", None)
-        if not cm:
-            continue
-        for cp in list(cm.keys()):
-            gn = cm[cp]
-            if gn in mapping:
-                cm[cp] = mapping[gn]
+        if cm:
+            for cp, gn in list(cm.items()):
+                cm[cp] = mapping.get(gn, gn)
+        if st.format == 14:
+            for selector, entries in list(st.uvsDict.items()):
+                st.uvsDict[selector] = [
+                    (cp, mapping.get(gn, gn) if gn is not None else None)
+                    for cp, gn in entries]
 
 
 def _rename_variation_maps(font, mapping):
@@ -118,12 +118,19 @@ def rename_glyphs(font, mapping):
         dupes = {n for n in new_order if new_order.count(n) > 1}
         raise ValueError("重命名产生重名: %s" % sorted(dupes)[:5])
 
+    # gvar 的惰性解码依赖旧 glyf 名字和点数，必须在移动轮廓键前展开。
+    if "gvar" in font:
+        font["gvar"].variations = dict(font["gvar"].variations.items())
     _rename_glyf(font, mapping)
     _rename_cff(font, mapping)
     _rename_metrics(font, "hmtx", mapping)
     _rename_metrics(font, "vmtx", mapping)
     _rename_cmap(font, mapping)
     _rename_variation_maps(font, mapping)
+    if "gvar" in font:
+        font["gvar"].variations = {mapping.get(gn, gn): value
+                                   for gn, value in
+                                   font["gvar"].variations.items()}
     if "VORG" in font and getattr(font["VORG"], "VOriginRecords", None):
         font["VORG"].VOriginRecords = {
             mapping.get(k, k): v for k, v in font["VORG"].VOriginRecords.items()}

@@ -465,7 +465,7 @@ def test_generic_merge_transfers_variation():
     assert with_deltas > len(added) * 0.9, \
         "只有 %d/%d 个新增字形保留增量" % (with_deltas, len(added))
 
-    from fontTools.pens.recordingPen import RecordingPen
+    from fontTools.pens.recordingPen import DecomposingRecordingPen
     from fontTools.varLib.instancer import instantiateVariableFont
     axis = result["fvar"].axes[0].axisTag
     top = result["fvar"].axes[0].maxValue
@@ -477,7 +477,10 @@ def test_generic_merge_transfers_variation():
         if gn not in bs:
             continue
         checked += 1
-        p1, p2 = RecordingPen(), RecordingPen()
+        # 组件必须按各自字形集展开：合法别名不应被误当几何变化；
+        # 也不能仅凭同名组件通过，展开后仍要求所有坐标严格零差异。
+        p1 = DecomposingRecordingPen(rs)
+        p2 = DecomposingRecordingPen(bs)
         rs[gn].draw(p1)
         bs[gn].draw(p2)
         if p1.value != p2.value:

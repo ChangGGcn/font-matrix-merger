@@ -8,11 +8,21 @@
 import copy
 from fontTools.ttLib import TTFont, newTable
 from fontTools.pens.qu2cuPen import Qu2CuPen
+from fontTools.pens.recordingPen import DecomposingRecordingPen
 from fontTools.pens.cu2quPen import Cu2QuPen
 from fontTools.pens.t2CharStringPen import T2CharStringPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.fontBuilder import FontBuilder
 from ..utils.detect import is_cff, is_ttf
+from .transform import _remove_hinting
+
+
+def _require_static_conversion(font):
+    """跨轮廓转换不支持轴拓扑迁移，拒绝静默烘焙默认轮廓。"""
+    if any(tag in font for tag in ("fvar", "gvar", "HVAR", "VVAR",
+                                   "MVAR", "cvar")):
+        print("  [告警] 拒绝跨轮廓转换可变字体，请先显式提取静态实例")
+        raise ValueError("跨轮廓转换前须先调用 variable_to_static")
 
 
 def cff_to_glyf(font):
@@ -20,7 +30,9 @@ def cff_to_glyf(font):
     if not is_cff(font):
         return copy.deepcopy(font)
 
+    _require_static_conversion(font)
     result = copy.deepcopy(font)
+    _remove_hinting(result)
     glyph_set = result.getGlyphSet()
     order = result.getGlyphOrder()
 
@@ -30,6 +42,8 @@ def cff_to_glyf(font):
 
     for gn in order:
         try:
+            if gn not in glyph_set:
+                raise ValueError("字形序列中的轮廓缺失")
             if gn in glyph_set:
                 tt_pen = TTGlyphPen(glyph_set)
                 cu2qu_pen = Cu2QuPen(tt_pen, max_err=1.0, reverse_direction=True)
@@ -43,8 +57,17 @@ def cff_to_glyf(font):
                     else:
                         g.recalcBounds(glyf_table)
                 glyf_table[gn] = g
-        except Exception:
-            pass
+        except Exception as exc:
+            print("  [告警] CFF→glyf 字形转换失败，拒绝输出不完整字体")
+            raise ValueError("CFF→glyf 字形转换失败: %s" % gn) from exc
+
+    if "VORG" in result and "vmtx" in result:
+        # VORG 删除前，把显式原点转入 glyf 的隐式 yMax+tsb。
+        for gn, (advance, _) in list(result["vmtx"].metrics.items()):
+            glyph = glyf_table[gn]
+            top = glyph.yMax if glyph.numberOfContours else 0
+            result["vmtx"].metrics[gn] = (
+                advance, result["VORG"][gn] - top)
 
     cff_key = "CFF2" if "CFF2" in result else "CFF "
     if cff_key in result:
@@ -54,6 +77,9 @@ def cff_to_glyf(font):
     if "loca" not in result:
         result["loca"] = newTable("loca")
     result.sfntVersion = "\x00\x01\x00\x00"
+    # CFF 的 maxp 0.5 缺少 TrueType 轮廓/指令资源字段，必须重建为 1.0。
+    FontBuilder(font=result).setupMaxp()
+    result["maxp"].numGlyphs = len(order)
 
     # 移除不兼容表
     for tag in ("cvt ", "fpgm", "prep", "gasp", "VORG", "DSIG"):
@@ -81,6 +107,9 @@ def glyf_to_cff(font):
     if not is_ttf(font):
         return copy.deepcopy(font)
 
+    _require_static_conversion(font)
+    font = copy.deepcopy(font)
+    _remove_hinting(font)
     glyph_set = font.getGlyphSet()
     order = font.getGlyphOrder()
 
@@ -89,9 +118,8 @@ def glyf_to_cff(font):
     for gn in order:
         glyph_obj = glyph_set.get(gn)
         if glyph_obj is None:
-            t2_pen = T2CharStringPen(width=0, glyphSet=glyph_set)
-            charstrings[gn] = t2_pen.getCharString()
-            continue
+            print("  [告警] glyf→CFF 轮廓缺失，拒绝输出空白字形")
+            raise ValueError("glyf→CFF 轮廓缺失: %s" % gn)
 
         width = glyph_obj.width
         cs = None
@@ -101,15 +129,16 @@ def glyf_to_cff(font):
                                  reverse_direction=True)
             glyph_obj.draw(qu2cu_pen)
             cs = t2_pen.getCharString()
-        except Exception:
-            pass
+        except Exception as exc:
+            print("  [告警] glyf→CFF 首次转换失败，改用分解轮廓重试: %s"
+                  % exc)
 
         if cs is None:
             try:
                 cs = _fallback_glyf_to_cff(glyph_set, gn, width)
-            except Exception:
-                t2_pen = T2CharStringPen(width=width, glyphSet=glyph_set)
-                cs = t2_pen.getCharString()
+            except Exception as exc:
+                print("  [告警] glyf→CFF 重试失败，拒绝输出空白字形")
+                raise ValueError("glyf→CFF 字形转换失败: %s" % gn) from exc
 
         charstrings[gn] = cs
 
@@ -227,19 +256,14 @@ def _apply_windows_fixes(result, source_font):
 
 
 def _fallback_glyf_to_cff(glyph_set, gn, width):
-    try:
-        tt_pen = TTGlyphPen(None)
-        cu2qu_pen = Cu2QuPen(tt_pen, max_err=1.0, reverse_direction=False)
-        glyph_set[gn].draw(cu2qu_pen)
-        cleaned = tt_pen.glyph()
-        t2_pen = T2CharStringPen(width=width, glyphSet=None)
-        qu2cu_pen = Qu2CuPen(t2_pen, max_err=1.0, all_cubic=True,
-                             reverse_direction=True)
-        cleaned.draw(pen=qu2cu_pen, glyfTable=None)
-        return t2_pen.getCharString()
-    except Exception:
-        t2_pen = T2CharStringPen(width=width, glyphSet=None)
-        return t2_pen.getCharString()
+    """先分解部件再近似；无法转换时抛错，不凭空生成空白字形。"""
+    recording = DecomposingRecordingPen(glyph_set)
+    glyph_set[gn].draw(recording)
+    t2_pen = T2CharStringPen(width=width, glyphSet=None)
+    qu2cu_pen = Qu2CuPen(t2_pen, max_err=1.0, all_cubic=True,
+                         reverse_direction=True)
+    recording.replay(qu2cu_pen)
+    return t2_pen.getCharString()
 
 
 def convert_font_format(font, to_cff):

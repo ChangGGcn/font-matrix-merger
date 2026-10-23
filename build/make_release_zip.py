@@ -2,10 +2,13 @@
 # -*- coding: utf-8 -*-
 """打包"仅源码"发布包 (GitHub Release asset)。
 
-只收 git **已跟踪**的 Python 源码与文档, 不含任何字体二进制、PyInstaller 产物
-或本地配置 (tests/local_fonts.py 之类被 .gitignore 排除的文件天然不会进来):
+只收 git **已跟踪**的 Python 运行库、CLI 与根文档，不含测试、构建脚本、
+内部工程文档、字体二进制或本地配置：
 
-    *.py + README.md + README.zh-CN.md + LICENSE + CHANGELOG.md
+    __init__.py + FontMerging.py + core/format/tables/utils 下的 *.py
+    README.md + README.zh-CN.md + CHANGELOG.md + 原 LICENSE
+
+默认包内目录为 FontMerger，解压后可直接从父目录 import FontMerger。
 
 用法::
 
@@ -25,8 +28,11 @@ import sys
 import time
 import zipfile
 
-#: 除了 *.py 之外要收进发布包的文件 (按 basename 匹配, 只取仓库根目录的文档)
-KEEP_NAMES = ("README.md", "README.zh-CN.md", "LICENSE", "CHANGELOG.md")
+#: 仅取仓库根文档，保留项目原有授权声明。
+KEEP_NAMES = ("README.md", "README.zh-CN.md", "CHANGELOG.md", "LICENSE")
+#: 运行库与 CLI 白名单；测试、构建工具及内部文档不进入发布资产。
+ROOT_MODULES = ("__init__.py", "FontMerging.py")
+PACKAGE_DIRS = ("core/", "format/", "tables/", "utils/")
 
 #: 发布包里绝不允许出现的扩展名 (防御性检查: 字体二进制与打包产物)
 FORBIDDEN_EXTS = (".ttf", ".otf", ".ttc", ".otc", ".woff", ".woff2", ".eot",
@@ -53,9 +59,11 @@ def read_version():
 
 def collect_files():
     """按 git 跟踪清单挑出要打包的文件 (排序, 保证可复现)"""
-    tracked = _run("git", "ls-files").split()
+    tracked = _run("git", "ls-files").splitlines()
     keep = sorted(f for f in tracked
-                  if f.endswith(".py") or os.path.basename(f) in KEEP_NAMES)
+                  if f in ROOT_MODULES or f in KEEP_NAMES
+                  or (f.endswith(".py") and f.startswith(PACKAGE_DIRS)
+                      and "__pycache__" not in f.split("/")))
     bad = [f for f in keep if f.lower().endswith(FORBIDDEN_EXTS)]
     if bad:
         raise SystemExit("发布包里混入了不该有的文件: %s" % bad)
@@ -85,12 +93,12 @@ def build(out_path, root, files, date_time):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="打包仅源码发布包")
     parser.add_argument("--out", help="输出路径 (缺省 dist/font-matrix-merger-v<版本>.zip)")
-    parser.add_argument("--root", help="包内顶层目录名 (缺省 font-matrix-merger-<版本>)")
+    parser.add_argument("--root", help="包内顶层目录名 (缺省 FontMerger)")
     parser.add_argument("--quiet", action="store_true", help="只输出结果行")
     args = parser.parse_args(argv)
 
     version = read_version()
-    root = args.root or "font-matrix-merger-" + version
+    root = args.root or "FontMerger"
     out = args.out or os.path.join(REPO, "dist",
                                    "font-matrix-merger-v%s.zip" % version)
     files = collect_files()

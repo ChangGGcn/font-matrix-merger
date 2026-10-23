@@ -276,6 +276,10 @@ def verify_merge(sources, merged, glyph_map=None, axis_positions="auto",
         failures.append("FeatureVariations 索引无效 %d 处: %s"
                         % (len(layout["bad_feature_variations"]),
                            layout["bad_feature_variations"][:3]))
+    if layout["bad_lookup_references"]:
+        failures.append("布局 lookup/feature 索引无效 %d 处: %s"
+                        % (len(layout["bad_lookup_references"]),
+                           layout["bad_lookup_references"][:3]))
     if layout["bad_var_stores"]:
         failures.append("ItemVariationStore/VariationIndex 结构非法 %d 处: %s"
                         % (len(layout["bad_var_stores"]),
@@ -578,7 +582,63 @@ def _check_layout_integrity(font):
             "unsorted_coverages": unsorted_count,
             "bad_mark_filters": bad_mark_filters,
             "bad_feature_variations": bad_feature_variations,
+            "bad_lookup_references": _check_lookup_references(font),
             "bad_var_stores": bad_var_stores}
+
+
+def _check_lookup_references(font):
+    """检查 Feature/LangSys 与上下文内部索引越界；语义另用引擎对照。"""
+    from fontTools.ttLib.tables import otTables as ot
+
+    problems = []
+    for tag in ("GSUB", "GPOS"):
+        if tag not in font:
+            continue
+        table = font[tag].table
+        lookups = (getattr(table.LookupList, "Lookup", [])
+                   if table.LookupList is not None else [])
+        features = (getattr(table.FeatureList, "FeatureRecord", [])
+                    if table.FeatureList is not None else [])
+
+        def check(index, count, label):
+            if not isinstance(index, int) or not 0 <= index < count:
+                problems.append((tag, label, index, count))
+
+        def walk(obj, seen, origin):
+            if id(obj) in seen:
+                return
+            seen.add(id(obj))
+            if isinstance(obj, (ot.SubstLookupRecord, ot.PosLookupRecord)):
+                check(obj.LookupListIndex, len(lookups), origin)
+                return
+            if isinstance(obj, dict):
+                children = obj.values()
+            elif isinstance(obj, (list, tuple)):
+                children = obj
+            elif hasattr(obj, "__dict__"):
+                children = [value for key, value in vars(obj).items()
+                            if not key.startswith("_")]
+            else:
+                children = []
+            for child in children:
+                walk(child, seen, origin)
+
+        for i, lookup in enumerate(lookups):
+            walk(lookup, set(), "context[%d]" % i)
+        for i, record in enumerate(features):
+            for index in record.Feature.LookupListIndex:
+                check(index, len(lookups), "feature[%d]" % i)
+        scripts = getattr(table, "ScriptList", None)
+        for record in getattr(scripts, "ScriptRecord", []):
+            script = record.Script
+            languages = [script.DefaultLangSys] if script.DefaultLangSys else []
+            languages += [r.LangSys for r in script.LangSysRecord]
+            for lang in languages:
+                if lang.ReqFeatureIndex != 0xFFFF:
+                    check(lang.ReqFeatureIndex, len(features), "required")
+                for index in lang.FeatureIndex:
+                    check(index, len(features), "language")
+    return problems
 
 
 def _check_var_stores(font):

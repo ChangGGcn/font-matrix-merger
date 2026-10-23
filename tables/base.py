@@ -19,6 +19,11 @@ def merge_all_tables(merged_font, main_font, base_fonts, added_glyphs=None):
     """
     对 merged_font 的每个表执行合并策略。
 
+    此兼容入口会重放 fvar/OT 等处理器，不可用作主流程的收尾。
+    已完成变化数据/布局合成时，应分别调用内部 table policy 与
+    metadata_recalc.recalc_after_merge，避免覆盖已合成表。
+    保持既有签名与 None 返回值；失败逐表告警，不能视为完整验证。
+
     参数:
         merged_font: 已含合并后字形的 TTFont
         main_font: 主字体

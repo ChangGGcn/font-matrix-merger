@@ -1,6 +1,10 @@
 """字体类型检测工具"""
 import re
 
+from fontTools.ttLib.tables._n_a_m_e import (
+    _MAC_LANGUAGES, _WINDOWS_LANGUAGES,
+)
+
 #: post 3.0 字体在加载时由 fontTools 生成的"序号名" (glyph00001…)。
 #: 这类名字**不具标识性**: 不同字体里同名不代表同源字形。
 AUTO_GLYPH_RE = re.compile(r"^glyph\d{5}$")
@@ -46,21 +50,65 @@ def glyph_to_codepoints(font):
     return m
 
 
+class _LocalizedText(str):
+    """保留 str 行为，同时携带原 name 记录供内部命名流程使用。"""
+
+    def __new__(cls, value, records=()):
+        result = str.__new__(cls, value)
+        result._name_records = tuple(records)
+        return result
+
+
+def _name_language(key):
+    """将已知平台语言号归一；未知语言保留平台与语言号，不猜英文。"""
+    platform, encoding, language = key
+    if platform == 3:
+        return _WINDOWS_LANGUAGES.get(language, (platform, language))
+    if platform == 1:
+        return _MAC_LANGUAGES.get(language, (platform, language))
+    return (platform, language)
+
+
+def _name_priority(record):
+    """英文优先，其次排印族名；排序不依赖表内记录次序。"""
+    name_id, platform, encoding, language, text = record
+    locale = _name_language((platform, encoding, language))
+    english = isinstance(locale, str) and locale.split("-")[0] == "en"
+    return (not english, name_id != 16, platform != 3,
+            platform, language, encoding, text)
+
+
+def _localized_records(font, name_ids):
+    """读取指定 ID 的所有可解码记录；坏记录告警后保留其余记录。"""
+    records = []
+    for record in font["name"].names:
+        if record.nameID not in name_ids:
+            continue
+        try:
+            text = record.toUnicode()
+        except (UnicodeDecodeError, UnicodeEncodeError, LookupError):
+            print("  [命名警告] 无法解码 nameID %d，改用其余记录"
+                  % record.nameID)
+            continue
+        records.append((record.nameID, record.platformID,
+                        record.platEncID, record.langID, text))
+    return sorted(set(records), key=_name_priority)
+
+
 def get_copyrights(*fonts):
+    """返回每个字体一条首选版权的 list；str 元素内部携带全部语言。"""
     result = []
-    for f in fonts:
-        for r in f["name"].names:
-            if r.nameID == 0:
-                result.append(r.toUnicode())
-                break
+    for font in fonts:
+        records = _localized_records(font, (0,))
+        if records:
+            result.append(_LocalizedText(records[0][-1], records))
     return result
 
 
 def get_family(font):
-    for r in font["name"].names:
-        if r.nameID in (1, 16):
-            return r.toUnicode()
-    return "Font"
+    """返回确定的首选族名 str：英文优先、同语言内优先 nameID 16。"""
+    records = _localized_records(font, (1, 16))
+    return _LocalizedText(records[0][-1], records) if records else "Font"
 
 
 def axis_space(font):

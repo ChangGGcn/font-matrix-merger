@@ -1,5 +1,5 @@
 """字形/度量/cmap 复制 — 通过 TTX XML roundtrip"""
-import os, sys, subprocess, copy, tempfile, atexit
+import os, sys, subprocess, copy, tempfile, atexit, weakref
 import xml.etree.ElementTree as ET
 from fontTools.ttLib import TTFont
 from ..utils.detect import is_cff
@@ -81,12 +81,12 @@ def inject_glyphs_xml(main_ttx, base_ttx, output_ttx, glyph_names):
     main_glyf = main_root.find("glyf")
     base_glyf = base_root.find("glyf")
     if main_glyf is not None and base_glyf is not None:
+        existing_names = {e.get("name") for e in main_glyf}
         for glyph_elem in base_glyf:
             name = glyph_elem.get("name")
-            if name and name in glyph_set:
-                existing_names = {e.get("name") for e in main_glyf}
-                if name not in existing_names:
-                    main_glyf.append(copy.deepcopy(glyph_elem))
+            if name and name in glyph_set and name not in existing_names:
+                main_glyf.append(copy.deepcopy(glyph_elem))
+                existing_names.add(name)
 
     # hmtx
     main_hmtx = main_root.find("hmtx")
@@ -181,14 +181,64 @@ def _extend_variation_maps(font, glyph_names):
                 m.mapping.setdefault(gn, NO_VARIATION_INDEX)
 
 
+def _prepare_glyph_copy(main_font, base_font, glyphs_to_add):
+    """补齐 glyf 依赖，并为同名组件单独改名，绝不借用主轮廓。"""
+    if "glyf" not in base_font:
+        return base_font, list(glyphs_to_add)
+    known = set(main_font.getGlyphOrder())
+    base_names = set(base_font.getGlyphOrder())
+    source_ref = (getattr(base_font, "_fontmerge_copy_source", None)
+                  or weakref.ref(base_font))
+    source = source_ref()
+    previous = getattr(main_font, "_fontmerge_glyph_sources", {})
+    same_source = {gn for gn, origin in previous.items()
+                   if source is not None and origin() is source}
+    required = set(glyphs_to_add) & base_names - known
+    pending = list(required)
+    while pending:
+        gn = pending.pop()
+        glyph = base_font["glyf"][gn]
+        if not glyph.isComposite():
+            continue
+        for comp in glyph.components:
+            cname = comp.glyphName
+            if cname not in base_names:
+                raise ValueError("打底组件不存在: %s → %s" % (gn, cname))
+            if cname not in required and cname not in same_source:
+                required.add(cname)
+                pending.append(cname)
+    ren = {}
+    taken = known | base_names
+    from .glyph_rename import alias_name, renamed_copy
+    for gn in base_font.getGlyphOrder():
+        if gn in required and gn in known:
+            ren[gn] = alias_name(gn, taken)
+            taken.add(ren[gn])
+    if ren:
+        base_font = renamed_copy(base_font, ren)
+        base_font._fontmerge_copy_source = source_ref
+        required = {ren.get(gn, gn) for gn in required}
+    return base_font, [gn for gn in base_font.getGlyphOrder()
+                       if gn in required]
+
+
+def _record_copy_sources(result, main_font, base_font, glyph_names):
+    """只在内存记同源分块来源；弱引用失效或重载后宁可独立复制。"""
+    origins = dict(getattr(main_font, "_fontmerge_glyph_sources", {}))
+    source = (getattr(base_font, "_fontmerge_copy_source", None)
+              or weakref.ref(base_font))
+    origins.update((gn, source) for gn in glyph_names)
+    result._fontmerge_glyph_sources = origins
+
+
 def merge_glyphs_object(main_font, base_font, glyphs_to_add):
     """对象级逐字形复制 (仅 glyf 轮廓), 等价于 TTX 往返但快几个数量级。
 
     整字体 TTX 往返的代价与字体规模成正比: 给 25k 字形的字体加 135 个字形
     也要序列化/编译整个字体 (实测约 150 秒)。glyf 路径直接搬对象即可:
 
-      * glyf: 深拷贝字形, 复合组件按名解析 (打底字形名即最终名);
-        组件既不在主字体也不在待加集合 → 跳过该字形 (否则编译时才炸);
+      * glyf: 深拷贝字形与组件闭包，同名组件先改名而不借用主轮廓;
+        打底组件缺失时明确失败，不能写出无法编译的字体;
       * hmtx/vmtx: 逐字形复制;
       * gvar: 逐字形复制增量 (打底静态时无增量);
       * HVAR/VVAR: DeltaSetIndexMap 补 NO_VARIATION_INDEX;
@@ -196,6 +246,8 @@ def merge_glyphs_object(main_font, base_font, glyphs_to_add):
 
     CFF/CFF2/CID 仍走 TTX 方案 (:func:`merge_glyphs_via_ttx`)。
     """
+    base_font, glyphs_to_add = _prepare_glyph_copy(
+        main_font, base_font, glyphs_to_add)
     result = copy.deepcopy(main_font)
     for tag in ("glyf", "hmtx", "vmtx", "gvar", "cmap", "HVAR", "VVAR"):
         if tag in result:
@@ -209,23 +261,8 @@ def merge_glyphs_object(main_font, base_font, glyphs_to_add):
     base_order = list(base_font.getGlyphOrder())
     base_names = set(base_order)
 
-    # 组件闭包: 复合字形的组件也必须在合并结果里 (组件名已在主字体中的除外,
-    # 它们直接解析到主字体的同名字形)。只按名取用会漏掉"被码位冲突删掉组件"
-    # 的那批复合字形 —— 旧 TTX 路径此时会在编译期报 KeyError 并整体放弃。
-    include = {gn for gn in glyphs_to_add
-               if gn in base_names and gn != ".notdef" and gn not in known}
-    changed = True
-    while changed:
-        changed = False
-        for gn in list(include):
-            glyph = base_font["glyf"][gn]
-            if not glyph.isComposite():
-                continue
-            for comp in glyph.components:
-                cname = comp.glyphName
-                if cname in base_names and cname not in include and cname not in known:
-                    include.add(cname)
-                    changed = True
+    # _prepare_glyph_copy 已补齐依赖并处理同名组件。
+    include = set(glyphs_to_add) & base_names - known
     # 保持打底字体的 GID 顺序 (Coverage/并行数组同序的前提)
     ordered = [gn for gn in base_order
                if gn in include and gn not in known]
@@ -254,6 +291,7 @@ def merge_glyphs_object(main_font, base_font, glyphs_to_add):
         result["maxp"].numGlyphs = len(order)
     _extend_variation_maps(result, added)
     _copy_cmap_mappings(result, base_font, added)
+    _record_copy_sources(result, main_font, base_font, added)
     return result
 
 
@@ -267,13 +305,17 @@ def merge_glyphs_via_ttx(main_font, base_font, glyphs_to_add, use_ttx=None):
         use_ttx: None = 按字体类型自动选择; True/False = 强制
     """
     if not glyphs_to_add:
-        return copy.deepcopy(main_font)
+        result = copy.deepcopy(main_font)
+        _copy_cmap_mappings(result, base_font, [])
+        return result
 
     if use_ttx is None:
         use_ttx = is_cff(main_font) or is_cff(base_font)
     if not use_ttx and "glyf" in main_font and "glyf" in base_font:
         return merge_glyphs_object(main_font, base_font, glyphs_to_add)
 
+    base_font, glyphs_to_add = _prepare_glyph_copy(
+        main_font, base_font, glyphs_to_add)
     tmpdir = tempfile.mkdtemp(prefix="fontmerge_")
     atexit.register(lambda: _rmtree(tmpdir))
 
@@ -319,41 +361,169 @@ def merge_glyphs_via_ttx(main_font, base_font, glyphs_to_add, use_ttx=None):
 
         # 复制新增字形的 cmap 映射
         _copy_cmap_mappings(result, base_font, glyphs_to_add)
+        _record_copy_sources(result, main_font, base_font, glyphs_to_add)
 
         return result
     finally:
         _rmtree(tmpdir)
 
 
-def _copy_cmap_mappings(dst, src, glyph_names):
-    """把打底字体中新增字形的 cmap 映射并入目标字体。
+def _unicode_cmap(font):
+    """返回优先最佳子表、再补其余子表独有码位的 Unicode 映射。"""
+    if "cmap" not in font:
+        return {}
+    result = dict(font.getBestCmap() or {})
+    for st in font["cmap"].tables:
+        if st.isUnicode() and st.format != 14:
+            for cp, gn in st.cmap.items():
+                result.setdefault(cp, gn)
+    return result
 
-    目标缺同 (platformID, platEncID) 的子表时**新建**一个 —— 否则主字体只有
-    format 4 时, 打底 format 12 里的非 BMP 码位会被整个丢掉。
+
+def _cmap_limit(fmt):
+    """返回格式能表达的最大码位；format 4 的 FFFF 是结束哨兵。"""
+    return {0: 0xFF, 2: 0xFFFF, 4: 0xFFFE, 6: 0xFFFF,
+            8: 0x10FFFF, 10: 0x10FFFF, 12: 0x10FFFF,
+            13: 0x10FFFF}.get(fmt, -1)
+
+
+def _copy_cmap_mappings(dst, src, glyph_names):
+    """就地并入新增字形映射，同步 Unicode 子表，保留主映射和 UVS。
+
+    非 Unicode 子表保持独立编码域；默认 UVS 遇到普通 cmap 主映射不同
+    时转为显式打底字形，以免把原有变体偷偷变成主字体轮廓。
     """
     if "cmap" not in dst or "cmap" not in src:
         return
     from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
 
+    available = set(dst.getGlyphOrder())
+    selected = set(glyph_names) & available
+    merged = _unicode_cmap(dst)
+    source = _unicode_cmap(src)
+    for cp, gn in source.items():
+        if gn in selected:
+            merged.setdefault(cp, gn)
+
     by_key = {}
-    for rt in dst["cmap"].tables:
-        if hasattr(rt, "cmap") and rt.cmap is not None:
-            by_key.setdefault((rt.platformID, rt.platEncID), rt)
-    for table in src["cmap"].tables:
-        if not (hasattr(table, "cmap") and table.cmap):
+    for st in dst["cmap"].tables:
+        key = (st.platformID, st.platEncID, st.format,
+               getattr(st, "language", 0))
+        by_key.setdefault(key, st)
+    for st in src["cmap"].tables:
+        if st.format == 14:
             continue
-        key = (table.platformID, table.platEncID)
-        rt = by_key.get(key)
-        if rt is None:
-            rt = CmapSubtable.newSubtable(table.format)
-            rt.platformID = table.platformID
-            rt.platEncID = table.platEncID
-            rt.language = getattr(table, "language", 0)
-            rt.cmap = {}
-            dst["cmap"].tables.append(rt)
-            by_key[key] = rt
-        for cp, gn in table.cmap.items():
-            if gn not in glyph_names:
-                continue
-            if cp not in rt.cmap:
-                rt.cmap[cp] = gn
+        entries = {cp: gn for cp, gn in st.cmap.items() if gn in selected}
+        if not entries:
+            continue
+        key = (st.platformID, st.platEncID, st.format,
+               getattr(st, "language", 0))
+        target = by_key.get(key)
+        if target is None:
+            # 同平台/编码/语言不能留下两个不同格式：fontTools 无法排序，
+            # 且选择方会产生歧义。保留表达范围较大的格式而非塞进窄表。
+            same_encoding = next((old for old in dst["cmap"].tables
+                                  if old.format != 14
+                                  and (old.platformID, old.platEncID,
+                                       getattr(old, "language", 0))
+                                  == (key[0], key[1], key[3])), None)
+            if (same_encoding is not None
+                    and _cmap_limit(same_encoding.format)
+                    >= _cmap_limit(st.format)):
+                target = same_encoding
+            else:
+                target = CmapSubtable.newSubtable(st.format)
+                target.platformID, target.platEncID = st.platformID, st.platEncID
+                target.language = getattr(st, "language", 0)
+                target.cmap = {}
+                if same_encoding is None:
+                    dst["cmap"].tables.append(target)
+                else:
+                    position = dst["cmap"].tables.index(same_encoding)
+                    dst["cmap"].tables[position] = target
+            by_key[key] = target
+        if not st.isUnicode():
+            for cp, gn in entries.items():
+                target.cmap.setdefault(cp, gn)
+
+    # format 0 的 GID 只有 8 位，Mac 等非 Unicode 子表也受此限制。
+    # Unicode 按稍后写入的并集判断；其它编码必须保留自己的映射域。
+    reverse = dst.getReverseGlyphMap()
+    for position, st in enumerate(dst["cmap"].tables):
+        if st.format != 0:
+            continue
+        mapping = ({cp: gn for cp, gn in merged.items() if 0 <= cp <= 0xFF}
+                   if st.isUnicode() else st.cmap)
+        if any(reverse[gn] > 0xFF for gn in mapping.values()):
+            wider = CmapSubtable.newSubtable(6)
+            wider.platformID, wider.platEncID = st.platformID, st.platEncID
+            wider.language = getattr(st, "language", 0)
+            wider.cmap = dict(st.cmap)
+            dst["cmap"].tables[position] = wider
+            print("  [cmap] 平台 %d/编码 %d 的 format 0 升级为 6："
+                  "保留映射，支持大于 255 的字形编号"
+                  % (st.platformID, st.platEncID))
+
+    # 子表身份包括格式与语言，不能把 format 12 写进同编码的 format 4。
+    for st in dst["cmap"].tables:
+        if st.isUnicode() and st.format != 14:
+            limit = _cmap_limit(st.format)
+            if limit >= 0:
+                st.cmap = {cp: gn for cp, gn in merged.items()
+                           if 0 <= cp <= limit}
+            if st.format in (12, 13):
+                # 新表的 XML 输出也要求头字段；只做 save() 无法发现缺项。
+                reverse = dst.getReverseGlyphMap()
+                groups = 0
+                previous = None
+                step = 1 if st.format == 12 else 0
+                for cp, gn in sorted(st.cmap.items()):
+                    gid = reverse[gn]
+                    if (previous is None or cp != previous[0] + 1
+                            or gid != previous[1] + step):
+                        groups += 1
+                    previous = (cp, gid)
+                st.reserved = 0
+                st.nGroups = groups
+                st.length = 16 + groups * 12
+
+    uvs_tables = [st for st in dst["cmap"].tables if st.format == 14]
+    pairs = {}
+    for st in uvs_tables:
+        for selector, entries in st.uvsDict.items():
+            target = pairs.setdefault(selector, {})
+            for cp, gn in entries:
+                target.setdefault(cp, gn)
+    changed = False
+    for st in src["cmap"].tables:
+        if st.format != 14:
+            continue
+        for selector, entries in st.uvsDict.items():
+            target = pairs.setdefault(selector, {})
+            for cp, gn in entries:
+                if cp in target:
+                    continue
+                if gn is None:
+                    original = source.get(cp)
+                    if original is None:
+                        continue
+                    if merged.get(cp) != original:
+                        if original not in selected:
+                            continue
+                        gn = original
+                    elif original not in available:
+                        continue
+                elif gn not in selected:
+                    continue
+                target[cp] = gn
+                changed = True
+    if changed:
+        if not uvs_tables:
+            target = CmapSubtable.newSubtable(14)
+            target.platformID, target.platEncID, target.language = 0, 5, 0
+            target.cmap = {}
+            dst["cmap"].tables.append(target)
+            uvs_tables.append(target)
+        for st in uvs_tables:
+            st.uvsDict = {selector: sorted(entries.items())
+                          for selector, entries in pairs.items() if entries}

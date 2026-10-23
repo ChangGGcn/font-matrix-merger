@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)]()
 [![FontTools](https://img.shields.io/badge/fontTools-%E2%89%A54.49-important.svg)]()
-[![Version](https://img.shields.io/badge/version-0.1.1-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)]()
 
 [English](README.md) | **简体中文**
 
@@ -11,7 +11,7 @@
 
 ## 项目简介
 
-本库构建于 [**FontTools**](https://github.com/fonttools/fonttools)（MIT 协议）之上——负责全部字形/表级操作、CFF/CFF2 转换、varLib 实例化与子集化；并遵循 [**AFDKO**](https://github.com/adobe-type-tools/afdko)（Adobe Font Development Kit for OpenType，Apache-2.0）的规范——AFDKO 被打包进本项目的 PyInstaller 构建管线，其 CIDKeyed UFO / CIDMap 重映射思路是 CID 合并实现的重要参考。
+本库构建于 [**FontTools**](https://github.com/fonttools/fonttools)（MIT 协议）之上——负责全部字形/表级操作、CFF/CFF2 转换、varLib 实例化与子集化；并遵循 [**AFDKO**](https://github.com/adobe-type-tools/afdko)（Adobe Font Development Kit for OpenType，Apache-2.0）的规范——其 CIDKeyed UFO / CIDMap 重映射思路是 CID 合并实现的重要参考。AFDKO 不是运行时依赖，当前 PyInstaller 管线也不收集它。
 
 发布历史（中英双语）：**[CHANGELOG.md](CHANGELOG.md)**。
 
@@ -53,10 +53,10 @@ FontMerger/
 | **可变字体** | 主 VF 输出保持可变（CFF2/HVAR/STAT/fvar 完整保留并补全）；主/打底轴空间与 `avar` 一致时，打底字形的 `gvar` 增量一并保留（HVAR 由幽灵点重建） |
 | **跨设计空间合成** | 打底的可变数据——`gvar` 增量、**CFF2 `blend`/`vsindex`**（含 `VarStore`/`HVAR` 并集）与布局变化数据（`GDEF` `ItemVariationStore` + `GPOS` `VariationIndex` 设备）——都重参数化到合并归一化空间（hat 精确分解），支持打底独有轴、不同范围/`avar`（用户空间钳制 + 精确拆 hat）；varStore **行保持** → 所有 `(outer, inner)` 引用无需重写；主字体自己的 varStore 同步重算；带自检门控与回退；策略参数 `compose_variations`/`compose_range`/`compose_fit`/`avar_mode`/`compose_layout` |
 | **Axis 并集** | 主/打底轴空间取并集；varStore（含 GDEF/HVAR/MVAR）恒定轴 Region 扩展 |
-| **OpenType 特性合并** | 打底 GSUB/GPOS/GDEF 用 Subsetter 闭包修剪后追加；同 tag feature **并成一条记录**，打底 Script/LangSys 一并并入（追加的 feature 才可达），FeatureList 重排后重写 `FeatureVariations` 索引，GDEF 字类/VarStore/MarkGlyphSets 取并集并重映射 `LookupFlag` bit4 的 `MarkFilteringSet` |
-| **缩放 + 基线偏移** | Pen 管线重建轮廓（T2CharStringPen/TTGlyphPen + TransformPen），度量同步 |
+| **OpenType 特性合并** | 打底 GSUB/GPOS/GDEF 用 Subsetter 闭包修剪后追加；同 tag feature 仅在**同一 Script/LangSys 内并集**，并完整重映射上下文内部 lookup 引用，打底 Script/LangSys 一并并入（追加的 feature 才可达），FeatureList 重排后重写 `FeatureVariations` 索引，GDEF 字类/VarStore/MarkGlyphSets 取并集并重映射 `LookupFlag` bit4 的 `MarkFilteringSet` |
+| **缩放 + 基线偏移** | 保留坐标/可变拓扑并同步纵向原点与度量；非恒等变换明确移除不安全 hinting 和像素缓存 |
 | **重叠合并** | 可变→静态实例化后 `removeOverlaps` 布尔合并 |
-| **子集化** | `create_glyph_subset` — 按字符集保留字形 |
+| **子集化** | `create_glyph_subset` 使用官方组件/布局闭包，保留已选空字形；失效缓存/签名和不支持的表明确告警删除 |
 | **WOFF/WOFF2 解包** | webfont 可直接作为输入 |
 | **同源分片并集** | `merge_subsets()`：同一 VF 的 `unicode-range` 分片对象级并集（不走 TTX）；**glyf + CFF2**（CharStrings/FDSelect/FDArray 并集，CFF2 `blend`/`vsindex` 原样保留）、feature/Script/GDEF VarStore/MarkGlyphSets 并集、FeatureVariations 索引重写、HVAR 重建（glyf）或 HVAR VarStore 并集（CFF2）、VVAR 重定位、cmap 统一、name 补全 |
 | **合并自检** | `verify_merge()`：多轴位置逐字形轮廓/度量比对 + cmap/特性/布局完整性/容器断言 |
@@ -68,21 +68,21 @@ FontMerger/
 
 主/打底各按 `静态/可变 × OTF/TTF` 分类，共 16 种组合的语义定义；**行 = 主字体类型，列 = 打底字体类型。**
 
-| | 静态OTF打底 | 静态TTF打底 | 可变OTF打底 | 可变TTF打底 |
+| | 静态 OTF 打底 | 静态 TTF 打底 | 可变 OTF 打底 | 可变 TTF 打底 |
 | :--- | :--- | :--- | :--- | :--- |
-| **静态OTF为主** | *通用*：多级打底合并、各字体独立缩放/基线偏移 | 询问用户导出为 TTF 还是 OTF | 将打底中与主字体已有字形**码位或名称**相同的字形删除；其余字形 + 仅与剩余字形相关的 OpenType 特性并入主字体（打底自动实例化为默认实例） | 将 OTF 中字形转换为二次曲线；随后同“可变OTF为主，静态OTF打底” |
-| **静态TTF为主** | 询问用户导出为 TTF 还是 OTF | *通用* | 将 TTF 中字形转换为三次曲线；随后同“可变OTF为主，静态OTF打底” | 同“可变OTF为主，静态OTF打底” |
-| **可变OTF为主** | 询问导出为可变还是静态：① 静态 → 插值得到与主字体轴值相同的静态字体，按静态处理；② 可变 → 删打底冲突字形，主字形加入可变OTF默认 Master，主字体 OpenType 特性插入各 Master | 同左（静态路径） | *Master 处理*：删打底各 Master 中冲突字形；打底各 Master 并入主——轴值相同则在主 Master 中增添字形与特性，轴值不同则新建 Master；*Axis 处理*：Axis 上下限取并集，打底独有 Axis 加入（缺失 Master 补默认值） | 询问导出为 TTF 还是 OTF；随后同“可变OTF为主，可变OTF打底” |
-| **可变TTF为主** | 询问导出为可变还是静态（同“可变OTF为主”；可变路径主字形转二次曲线后同左） | 同左（静态路径） | 询问导出为 TTF 还是 OTF；随后同“可变OTF为主，可变OTF打底” | 同“可变OTF为主，可变OTF打底” |
+| **静态 OTF 为主** | 合并 CFF 字形 | 打底转 CFF 后合并 | 打底按默认实例化后合并 | 打底实例化、转 CFF 后合并 |
+| **静态 TTF 为主** | 打底转 glyf 后合并 | 合并 glyf 字形 | 打底实例化、转 glyf 后合并 | 打底按默认实例化后合并 |
+| **可变 OTF 为主** | 询问可变/静态；保留主 VF 或实例化主字体 | 同左，并将打底转 CFF | 尝试 CFF2 合成；自检失败则回退 | 跨轮廓合成不支持；打底实例化/转换，保留主 VF |
+| **可变 TTF 为主** | 询问可变/静态，并将打底转 glyf | 询问可变/静态；保留主 VF 或实例化主字体 | 跨轮廓合成不支持；打底实例化/转换，保留主 VF | 尝试 gvar/HVAR 合成；自检失败则回退 |
 
 > **关于“导出格式”询问**：TTF/OTF 问题仍会询问并在多级间记忆，但当前实现的输出轮廓格式由**主字体**决定（打底轮廓会转换为主字体的格式）；真正改变代码路径的只有“可变/静态”这一问。该差异已记为技术债（见工程笔记）。
 
 ### 通用规则（所有组合）
 
 1. **多级打底**：主字体与前 (n−1) 级打底字体的结果作为第 n 级的“主字体”；已询问过的复杂情况不再询问（记忆）
-2. **名称**：Family 名改为 `<主字体名称> mod`；版权信息写入所有版权字段（`^n^n` 分隔）；其余信息与主字体相同
+2. **名称**：各语言 Family 改为 `<主字体族名> mod`，版权按语言合并；同步全名、排印名和 PostScript 名，保留来源版本与归属记录
 3. **OpenType 特性**：主字体特性完全保留；打底与主不冲突的语言/特性表可完全保留（剔除与已删除字形相关的项）；冲突以主为准
-4. **字形保留**：主字体所有字形保留；打底仅“码位与名称均不与主字体冲突”的字形并入
+4. **字形保留**：主字体字形与映射全部保留；打底部分码位冲突时仍保留独有码位，同名加别名，并保留必需组件、布局与 UVS 依赖
 5. **输入格式**：WOFF/WOFF2 自动解包；TTC/OTC 需先解包；其他格式拒绝
 
 > **当前实现状态**：可变主字体的“② 可变路径”已支持（主 VF 保留输出 + Axis 并集 + 打底字形并入）。自 **v0.1.1** 起打底的可变数据也会被**合成**：逐字形 `gvar` 增量、CFF2 `blend`/`vsindex` 数据与打底布局变化数据都会重参数化到合并归一化空间（见 Features 与已知限制 #2），并带网格自检与自动回退（不通过则回退到“按打底默认实例化”的旧行为）。
@@ -220,7 +220,8 @@ result = merge_fonts("main.otf", ["base.otf"], answers={"vOTF_sOTF": "静态"})
 ```python
 # 跨设计空间合并：打底带来自己的轴与 avar
 merger = FontMerger(compose_variations=True, compose_range="main+extra", avar_mode=0)
-r = merger.merge_two("Main-VF.ttf", "Base-VF.ttf")
+from FontMerger import load_font
+r = merger.merge_two(load_font("Main-VF.ttf"), load_font("Base-VF.ttf"))
 ```
 
 ### 同源分片并集（`merge_subsets`）
@@ -253,20 +254,50 @@ gmap = merged.subset_merger.glyph_map()
 merged = merge_subsets(paths, out_path="Merged.ttf", tag="ja", verify=True)
 ```
 
+### 合并安全与元数据
+
+异源合并的每个成功出口都检查 Unicode/UVS 精确并集、主映射优先和结构引用（含上下文内部 lookup 索引）。注入失败抛错，不返回部分字体冒充成功；可变合成失败仍告警并执行既有回退。
+
+收尾按最终数据重算 OS/2 范围、平均 advance、最大上下文、包围盒和度量。Win 度量扩大以覆盖全部默认轮廓（可能增大行高）；主字体的 typo 度量、PANOSE、版本与渲染策略不从另一设计猜测。失效签名和过期设备缓存（DSIG/hdmx/LTSH/VDMX）按明确策略删除。
+
+TrueType 字形指令仅在解释器环境兼容，或旧字体完全无 hint 环境而明确整体采用打底程序时保留；否则剥离新字形指令并告警。非恒等缩放/偏移或 UPM 改变会明确移除不安全 hinting；不保证任意字节码语义等价或 Windows 栅格像素完全一致。
+
+旧编码的 cmap format 0（含非 Unicode 的 Macintosh Roman 子表）在合并后字形编号超过 255 时升级为 format 6，保留平台、编码、语言及原映射域；GID=255 的合法 format 0 保持不变。这可避免保存时的 `OverflowError: unsigned byte integer is greater than maximum`，无需删除旧映射或升级 fontTools。
+
+### v0.2.0 预发布运行包
+
+GitHub Release 标记为 **pre-release**。ZIP 只包含 Python 运行库与 CLI、两版 README、CHANGELOG 和原授权声明，不包含测试、构建脚本、内部工程文档、字体或生成的二进制。请解压到独立目录，包内顶层为 `FontMerger/`，可运行 `python FontMerger/FontMerging.py`，或从其父目录 `import FontMerger`。下文开发/测试命令需克隆仓库使用，运行 ZIP 有意不收录这些文件。
+
 ### 测试
 
 `tests/generate_matrix.py` 生成 16 组合完整矩阵；`tests/test_merger.py` 为单元测试，`tests/test_subset_merge.py` 覆盖同源分片并集。分片用例用 `pyftsubset` 现场生成夹具（`tests/subset_fixture.py`），不需要随仓库分发任何 webfont 分片。测试需要本地字体集（路径解析于 `tests/../test/`）——**字体本身不随仓库分发**。公开的 OFL 字体可自行从各自上游项目下载；**商业授权**测试字体需本地自备，并通过不入库的 `tests/local_fonts.py` 引用（模板：`tests/local_fonts.example.py`）。任一字体缺失时对应用例自动跳过。
+
+统一运行原套件及合成回归：
+
+```bash
+python3 tests/run_regressions.py
+python3 tests/run_regressions.py --synthetic-only
+python3 tests/run_regressions.py --engines
+```
+
+运行器分别汇报每套退出码、用例数与 **SKIP 数**，并保留完整临时日志。合成夹具不需要外部字体；可选引擎套件只用标准库 ctypes 调用现有系统 HarfBuzz/FreeType，不安装依赖，缺库明确跳过。
+
+#### v0.2.0 预发布验证（2026-10-24）
+
+- 本地统一运行 **157/157 通过，0 跳过**：原套件 46 例、合成回归 105 例、可选真实引擎 6 例。这是本地实测，不是 GitHub CI 保证；其它环境缺字体或系统库时可能出现 SKIP。
+- Windows 原生 **Python 3.10.11 / fontTools 4.61.0**：**21 条 cmap 回归**全部通过；含缩放和基线偏移的双可变字体完整 CLI 场景成功保存、重载，产物 **31,060 字形、30,012 Unicode 码位**，缺失/多余码位及主映射差异均为 0，无合成回退。授权输入与输出均不分发。
+- 此结果验证保存及 fontTools 重载，**不代表**已验证 Windows 安装或 GDI/DirectWrite 渲染；声明的 Python 3.8 基线通过 AST 语法检查，但未在 Python 3.8 解释器上实跑。
 
 ## 已知限制
 
 1. **JP（CID CFF2）作主字体**（矩阵 C1/D1）：合并本身成功（约 18,600~18,868 字形），但保存阶段打底拉丁字形在 cmap format 4 的引用偶发不完整；矩阵生成器降级走静态实例化路径。如需真·可变输出，需攻克 CFF2 CID 注入的更深层命名空间问题
 2. **跨设计空间的字形增量**：主/打底同为可变且**轴空间与 `avar` 完全一致**时（`axes_compatible()` 判定），打底 `gvar` 增量 1:1 搬入并用幽灵点重建 `HVAR`；轴空间不一致（轴集合/范围或 avar 不同）时走**合成**路径——由 `format/axis_mapping.py` 把打底增量重参数化到合并归一化空间，经 `verify_composition` 网格自检（容差 1 单位）通过才采用，否则透明回退到"打底按默认实例化"。该路径目前的缺口：(a) 要求主/打底的可变数据在**同一种轮廓技术**里：`glyf` 组合需要两边都有 `gvar`，CFF2 组合需要两边都有带 `VarStore` 的 `CFF2`（`glyf`↔`CFF2` 混搭、或变化数据在别的表里，仍回退实例化）；CFF2 路径里打底 `HVAR` 按字形名并入，而 `VVAR` 与 Private 的 hint 变化保持静态（hint 的 blend 折成默认值）；(b) 合并后的 `avar` 是主字体的，若主轴把某段用户区间压成归一化空间的一个点（`collapsing_flats()`），打底在该区间的增量在 OT 模型下无法逐点还原——检测到会告警并保留主字体行为（可传 `avar_mode=2` 丢弃 `avar` 以恢复打底增量，代价是改变主字体的插值）；(c) 打底的布局变化数据也会搬入（`transfer_base_layout()`：`GDEF` `ItemVariationStore` + `GPOS` `VariationIndex`），但 VariationIndex 的增量是整数，重参数化后的列要取整，所以 kerning/anchor 变化可能有至多约 1 单位的偏差（实测 UPM 1000 下打底字体的 kerning 偏差为 0.70 单位）——可传 `compose_layout=False` 保持旧行为（打底布局冻结在合并默认点）；(d) 主字体自己的 varStore 只在轴空间真的变化时（`compose_range="union"`/`"main"` 或 `avar_mode != 0`）才重参数化，此时默认点的那一项由"恒定 region"（全轴峰值 0）承载
-3. **OpenType 特性**：追加的打底 feature 所引用字形必须存在于主字体（否则跳过该 lookup）。同 tag feature 并成一条记录；打底 Script/LangSys 一并并入（否则追加的 feature 不可达）；FeatureList 重排后重写 `FeatureVariations` 的 FeatureIndex（表本身保留，无法映射的记录才会被丢）；GDEF `GlyphClassDef`/`MarkAttachClassDef`/`MarkGlyphSetsDef` 与 `ItemVariationStore` 均取并集，并重映射 `LookupFlag` bit4 的 `MarkFilteringSet`。异源路径不并入**打底字体自己的** `FeatureVariations`（只保留主字体的）
+3. **OpenType 特性**：追加的打底 feature 所引用字形必须存在于主字体（否则跳过该 lookup）。同 tag feature 仅在同一 Script/LangSys 内并集，不跨脚本串用；上下文内部 lookup 引用完整重映射；打底 Script/LangSys 一并并入（否则追加的 feature 不可达）；FeatureList 重排后重写 `FeatureVariations` 的 FeatureIndex（表本身保留，无法映射的记录才会被丢）；GDEF `GlyphClassDef`/`MarkAttachClassDef`/`MarkGlyphSetsDef` 与 `ItemVariationStore` 均取并集，并重映射 `LookupFlag` bit4 的 `MarkFilteringSet`。主字体已有该布局表时，异源路径不跨来源拼接**打底字体自己的** `FeatureVariations`；主表缺失时可完整采用合法打底表。未默认开启通用跨来源码位统一，避免重复定位
 4. **VORG**：默认轴位置实例化时数值正确；非默认位置需额外重算
 5. **多级 OT 特性**：上级已并入的 feature 会在下级被重复检测（幂等，但 lookup 可能冗余）
 6. **打包**：仓库根目录即包本身，`pip install` 尚未接线——目前 clone 即用；PyPI 化目录结构在规划中
 7. **授权测试字体**仅用于本地测试，刻意不包含在本仓库中（需本地自备，见未入库的 `tests/local_fonts.py`）；仓库不分发任何字体文件，文档中只出现公开发布的 OFL 字体名。
-8. **`merge_subsets()` 的 CFF2 边界**：glyf 与 CFF2 分片都支持，但 CFF2 要求各分片共享同一 **VarStore / GlobalSubrs** 结构（pyftsubset 会原样保留）；FDArray 的差异由 FD 级并集处理。若某个工具逐分片重建/重编号了 CFF2 VarStore，则 `blend`/`vsindex` 需要重写——该路径会明确报错而不是产出坏字体。CFF 与 CFF2 混合分片不支持。
+8. **`merge_subsets()` 的 CFF2 边界**：glyf 与 CFF2 分片都支持，但 CFF2 要求各分片共享同一 **VarStore / GlobalSubrs** 结构（pyftsubset 会原样保留）；FDArray 的差异由 FD 级并集处理。若某个工具逐分片重建/重编号了 CFF2 VarStore，则 `blend`/`vsindex` 需要重写——该路径会明确报错而不是产出坏字体。CFF 与 CFF2 混合分片不支持。布局 `FeatureVariations` 条件序列也必须兼容；条件顺序不一致时明确拒绝，不做有损拼接。
 9. **自动名字形一律加别名**：post 3.0 的序号名（`glyphNNNNN`）在分片间同名但不同源，故一律改名保留——同一无码位字形被多个分片保留时会多出一份内容相同的副本，用少量体积换取"绝不混淆两个不同字形"。
 
 ## 协议

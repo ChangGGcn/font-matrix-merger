@@ -19,7 +19,7 @@
     result.subset_merger.glyph_map()      # 源字形 → 合并后 GID
 """
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 from .core.merger import FontMerger, axes_compatible, transfer_glyph_variations
 from .core.conflict import resolve_conflicts, plan_alias
