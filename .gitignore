@@ -51,9 +51,11 @@ matrix_out/
 tests/local_fonts.py
 
 # === 工程文档：本地私有，不入库、不进发布包 ===
-# docs/ 与仓库根 AGENTS.md 供本地开发与多 Agent 协作使用
-/docs/
+# devdocs/ 与仓库根 AGENTS.md 供本地开发与多 Agent 协作使用
+/devdocs/
 /AGENTS.md
+# 用户保留的旧 README 对照稿，不提交、不打包
+/README.zh-CN.md.backup
 
 # === 编辑器 / 操作系统 ===
 .idea/

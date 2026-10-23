@@ -13,6 +13,36 @@ All notable changes to **font-matrix-merger** are documented in this file.
 
 ### 简体中文
 
+## [0.2.1] — 2026-10-24
+
+### English
+
+#### Added
+- Public technical documentation under `doc/en/` and `doc/zh-CN/`, with usage, complete API parameters, variation/subset models, architecture, script reference and support boundaries. Both languages are included in the runtime ZIP.
+- An explicit `--preview` ZIP option includes untracked public Markdown for review without staging or publishing; preview filenames end in `-review.zip`.
+
+#### Changed
+- Version **0.2.1**, published as a normal GitHub release. The runtime ZIP now includes the bilingual technical manual alongside the library, CLI and root documentation.
+- Shorten the English README to follow the author-edited Chinese version. Move detailed material into topic pages, correct dependency/import examples and replace unsupported guarantees with source-backed support conditions.
+- Rename private engineering documents from `docs/` to `devdocs/`. Keep that directory, root AGENTS and `README.zh-CN.md.backup` out of Git and release archives.
+
+#### Validation
+- The local v0.2.1 regression run passes 157/157 cases with 0 skips. The 20-file bilingual manual has no missing local links; 38 Python examples pass syntax checks, and both README workflows run from the extracted review ZIP using synthetic fonts. Runtime code is unchanged except for the version string.
+
+### 简体中文
+
+#### 新增
+- 在 `doc/en/` 与 `doc/zh-CN/` 新增公开技术文档，涵盖使用方法、完整 API 参数、可变/分片模型、架构、脚本参考及支持边界。两种语言均随运行 ZIP 发布。
+- 增加显式 `--preview` 审核选项，无需暂存或发布即可收录未跟踪的公开 Markdown，预览包名以 `-review.zip` 结尾。
+
+#### 变更
+- 版本 **0.2.1**，作为 GitHub 正式版本发布。运行 ZIP 在库、CLI 与根文档之外收录双语技术手册。
+- 以作者修改的中文版本为参照精简英文 README，将详细内容迁至分主题文档，修正依赖/导入示例，并把缺乏支持的保证改为源码可核实的条件说明。
+- 私有工程文档从 `docs/` 迁至 `devdocs/`，继续排除该目录、根 AGENTS 和 `README.zh-CN.md.backup`，不提交、不打包。
+
+#### 验证
+- 本地 v0.2.1 回归 157/157 通过，0 跳过；20 份双语手册无缺失本地链接，38 个 Python 示例通过语法检查，两版 README 的流程均使用合成字体从解压审核包执行通过。运行库仅更新版本字符串。
+
 ## [0.2.0] — 2026-10-24
 
 > GitHub pre-release / GitHub 预发布
@@ -169,7 +199,8 @@ All notable changes to **font-matrix-merger** are documented in this file.
 - 双语文档（English + 简体中文）、PyInstaller 构建管线（`build/`）、单元测试与 16 组合矩阵生成器。
 - MIT 协议；测试字体为 OFL 或仅本地存在，绝不随仓库分发。
 
-[Unreleased]: https://github.com/ChangGGcn/font-matrix-merger/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ChangGGcn/font-matrix-merger/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/ChangGGcn/font-matrix-merger/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ChangGGcn/font-matrix-merger/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/ChangGGcn/font-matrix-merger/compare/v0.1.0-alpha1...v0.1.1
 [0.1.0-alpha1]: https://github.com/ChangGGcn/font-matrix-merger/releases/tag/v0.1.0-alpha1
